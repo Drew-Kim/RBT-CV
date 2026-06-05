@@ -1,0 +1,32 @@
+# Local Python environment
+.venv/
+venv/
+env/
+
+# Python caches and test artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Generated app outputs
+outputs/
+
+# Local data files are large and should not be committed.
+data/
+res/
+*.avi
+*.mp4
+*.mov
+*.xlsb
+*.xlsx
+*.csv
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
