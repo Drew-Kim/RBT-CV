@@ -1,18 +1,48 @@
-# Local Python environment
+# Local Python environments
 .venv/
+.venv-dlc/
 venv/
 env/
+ENV/
 
-# Python caches and test artifacts
+# Python caches, build artifacts, and test artifacts
 __pycache__/
 *.py[cod]
 *$py.class
+.Python
+.coverage
+.coverage.*
+.eggs/
+.hypothesis/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.ipynb_checkpoints/
+build/
+dist/
+*.egg-info/
 
-# Generated app outputs
+# Generated RBT-CV outputs
 outputs/
+
+# DeepLabCut/model outputs are large and regenerated locally
+models/
+dlc-models/
+evaluation-results/
+training-datasets/
+labeled-data/
+videos/
+*.h5
+*.hdf5
+*.pickle
+*.pkl
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.pb
+*.npy
+*.npz
 
 # Local data files are large and should not be committed.
 data/
@@ -24,9 +54,12 @@ res/
 *.xlsx
 *.csv
 
+# Local secrets/config
+.env
+.env.*
+
 # OS/editor noise
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
-

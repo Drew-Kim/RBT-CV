@@ -29,9 +29,9 @@ class TrialAnnotation:
     stop_x: int
     stop_y: int
     crossing_time: float
-    manual_time: str
-    delta: str
-    validation: str
+    outcome: str
+    distance_cm: int
+    max_time_applied: str
     saved_at: str
 
 
@@ -68,4 +68,3 @@ class AnnotationStore:
 
 def now_stamp() -> str:
     return datetime.now().isoformat(timespec="seconds")
-
