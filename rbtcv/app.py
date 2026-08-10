@@ -158,6 +158,7 @@ class RBTReviewApp(tk.Tk):
         self._build_tick_controls(sidebar)
         self._build_detection_controls(sidebar)
         self._build_timing_controls(sidebar)
+        self._build_day_batch_button(sidebar)
         self._build_result_box(sidebar)
     def _build_day_controls(self, sidebar: ttk.Frame) -> None:
         ttk.Label(sidebar, text="Day").grid(row=0, column=0, sticky="w")
@@ -305,11 +306,18 @@ class RBTReviewApp(tk.Tk):
         ttk.Button(mark_box, text="Save Trial Result", command=self.save_annotation).grid(
             row=2, column=0, columnspan=2, sticky="ew", pady=(7, 0)
         )
+    def _build_day_batch_button(self, sidebar: ttk.Frame) -> None:
+        self.day_batch_button = ttk.Button(
+            sidebar,
+            text="Calibrate & Analyze Day",
+            command=self.calibrate_and_analyze_day,
+        )
+        self.day_batch_button.grid(row=9, column=0, sticky="ew", pady=(0, 8))
+
     def _build_result_box(self, sidebar: ttk.Frame) -> None:
         result_box = ttk.LabelFrame(sidebar, text="Scoring Preview", padding=6)
-        result_box.grid(row=9, column=0, sticky="ew")
+        result_box.grid(row=10, column=0, sticky="ew")
         ttk.Label(result_box, textvariable=self.result_var).grid(row=0, column=0, sticky="w")
-
     def _build_video_panel(self, parent: ttk.PanedWindow) -> None:
         self.video_panel = ttk.Frame(parent)
         self.video_panel.columnconfigure(0, weight=1)
@@ -1327,25 +1335,32 @@ class RBTReviewApp(tk.Tk):
             self.after(0,lambda:(setattr(self,"dlc_running",False),done(code,out)))
         threading.Thread(target=work,daemon=True).start()
 
-    def auto_detect_day_ticks(self):
-        if self.dataset is None:
+    def _calibrate_day_ticks(self, on_complete=None) -> bool:
+        if self.dataset is None or not self.day_var.get():
             self.tick_status_var.set("Choose a video folder first.")
-            return
+            return False
 
-        videos = [video for video in self.dataset.videos if video.day == self.day_var.get() and video.trial == 1]
-        if not videos:
+        day = self.day_var.get()
+        t1_videos = [
+            video
+            for video in self.dataset.videos
+            if video.day == day and video.trial == 1
+        ]
+        if not t1_videos:
             self.tick_status_var.set("No T1 videos found for this day.")
-            return
+            return False
 
         def run(index: int = 0, complete: int = 0) -> None:
-            if index >= len(videos):
+            if index >= len(t1_videos):
                 self.saved_tick_calibrations = self.tick_store.load_by_key()
                 self.tick_status_var.set(
-                    f"Tick Calibration Complete. {complete}/{len(videos)} T1 calibration(s) confirmed."
+                    f"Tick Calibration Complete. {complete}/{len(t1_videos)} T1 calibration(s) confirmed."
                 )
+                if on_complete is not None:
+                    on_complete(complete, len(t1_videos))
                 return
 
-            video = videos[index]
+            video = t1_videos[index]
             _python, _script, _track, tick_config = self._runtime()
 
             def finish(code: int, _output: str) -> None:
@@ -1365,10 +1380,37 @@ class RBTReviewApp(tk.Tk):
                     "10",
                 ],
                 finish,
-                f"Detecting day ticks {index + 1}/{len(videos)}: Cage {video.cage_number} Rat {video.rat_id}, T1...",
+                f"Detecting day ticks {index + 1}/{len(t1_videos)}: Cage {video.cage_number} Rat {video.rat_id}, T1...",
             )
 
         run()
+        return True
+
+    def auto_detect_day_ticks(self):
+        self._calibrate_day_ticks()
+
+    def calibrate_and_analyze_day(self) -> None:
+        if self.dataset is None or not self.day_var.get():
+            self.status_var.set("Choose a video folder first.")
+            return
+
+        day = self.day_var.get()
+        day_videos = [video for video in self.dataset.videos if video.day == day]
+        if not day_videos:
+            self.status_var.set("No videos found for this day.")
+            return
+
+        def begin_analysis(complete: int, total: int) -> None:
+            if complete != total:
+                self.status_var.set(
+                    f"Day calibration incomplete ({complete}/{total}). Day analysis was not started."
+                )
+                return
+            self.status_var.set("Day ticks confirmed. Starting day analysis...")
+            self._analyze(day_videos, f"{day} batch", True)
+
+        self.status_var.set(f"Calibrating {day} ticks before day analysis...")
+        self._calibrate_day_ticks(begin_analysis)
     def show_frame(self, frame_number: int) -> None:
         if self.cap is None: return
         frame_number=max(0,min(frame_number,max(self.frame_count-1,0))); self.cap.set(cv2.CAP_PROP_POS_FRAMES,frame_number); ok,frame=self.cap.read()
