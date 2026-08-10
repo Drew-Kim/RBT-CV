@@ -82,6 +82,10 @@ class RBTReviewApp(tk.Tk):
         self.fps = 15.0
         self.video_width = 640
         self.video_height = 480
+        self.display_scale = 1.0
+        self.display_width = 640
+        self.display_height = 480
+        self.display_resize_id: str | None = None
         self.photo: ImageTk.PhotoImage | None = None
         self.playing = False
         self.after_id: str | None = None
@@ -307,14 +311,14 @@ class RBTReviewApp(tk.Tk):
         ttk.Label(result_box, textvariable=self.result_var).grid(row=0, column=0, sticky="w")
 
     def _build_video_panel(self, parent: ttk.PanedWindow) -> None:
-        video_panel = ttk.Frame(parent)
-        video_panel.columnconfigure(0, weight=1)
-        video_panel.rowconfigure(0, weight=1)
-        parent.add(video_panel, weight=1)
+        self.video_panel = ttk.Frame(parent)
+        self.video_panel.columnconfigure(0, weight=1)
+        self.video_panel.rowconfigure(0, weight=1)
+        parent.add(self.video_panel, weight=1)
 
-        self._build_video_canvas(video_panel)
-        self._build_playback_controls(video_panel)
-
+        self._build_video_canvas(self.video_panel)
+        self._build_playback_controls(self.video_panel)
+        self.video_panel.bind("<Configure>", self._on_video_panel_resize)
     def _build_video_canvas(self, video_panel: ttk.Frame) -> None:
         self.canvas = tk.Canvas(video_panel, width=640, height=480, bg="#000000", highlightthickness=0)
         self.canvas.grid(row=0, column=0, sticky="n")
@@ -322,6 +326,7 @@ class RBTReviewApp(tk.Tk):
 
     def _build_playback_controls(self, video_panel: ttk.Frame) -> None:
         controls = ttk.Frame(video_panel, padding=(0, 8, 0, 0))
+        self.playback_controls = controls
         controls.grid(row=1, column=0, sticky="ew")
         controls.columnconfigure(4, weight=1)
 
@@ -335,6 +340,61 @@ class RBTReviewApp(tk.Tk):
         ttk.Label(controls, textvariable=self.frame_var, width=16).grid(row=0, column=5)
         ttk.Label(controls, textvariable=self.time_var, width=14).grid(row=0, column=6)
 
+    def _on_video_panel_resize(self, _event: tk.Event) -> None:
+        self._schedule_display_fit()
+
+    def _schedule_display_fit(self) -> None:
+        if self.display_resize_id is None:
+            self.display_resize_id = self.after_idle(self._fit_video_display)
+
+    def _fit_video_display(self) -> None:
+        self.display_resize_id = None
+        panel_width = self.video_panel.winfo_width()
+        panel_height = self.video_panel.winfo_height()
+        controls_height = max(self.playback_controls.winfo_reqheight(), 36)
+        available_width = panel_width - 12
+        available_height = panel_height - controls_height - 12
+        if available_width <= 1 or available_height <= 1:
+            return
+
+        scale = min(
+            1.5,
+            available_width / max(self.video_width, 1),
+            available_height / max(self.video_height, 1),
+        )
+        # The previous native-size display is always available as a safe minimum.
+        scale = max(1.0, scale)
+        width = max(1, int(round(self.video_width * scale)))
+        height = max(1, int(round(self.video_height * scale)))
+        if width == self.display_width and height == self.display_height:
+            return
+
+        self.display_scale = width / max(self.video_width, 1)
+        self.display_width = width
+        self.display_height = height
+        self.canvas.config(width=width, height=height)
+        if self.cap is not None:
+            self.show_frame(self.current_frame)
+
+    def _canvas_point(self, x: float, y: float) -> tuple[float, float]:
+        return x * self.display_scale, y * self.display_scale
+
+    def _video_point(self, x: float, y: float) -> tuple[int, int]:
+        scale = self.display_scale or 1.0
+        video_x = int(round(x / scale))
+        video_y = int(round(y / scale))
+        return (
+            max(0, min(video_x, self.video_width - 1)),
+            max(0, min(video_y, self.video_height - 1)),
+        )
+
+    def _canvas_image(self, frame_rgb) -> Image.Image:
+        image = Image.fromarray(frame_rgb)
+        target_size = (self.display_width, self.display_height)
+        if image.size == target_size:
+            return image
+        resampling = getattr(Image, "Resampling", Image).BILINEAR
+        return image.resize(target_size, resampling)
     def _bind_keys(self) -> None:
         self.bind("<space>", lambda _event: self.toggle_play())
         self.bind("<Left>", lambda _event: self.step_frame(-1))
@@ -354,6 +414,9 @@ class RBTReviewApp(tk.Tk):
         self.fps = 15.0
         self.video_width = 640
         self.video_height = 480
+        self.display_scale = 1.0
+        self.display_width = 640
+        self.display_height = 480
         self.photo = None
         self.marks = {}
         self.current_calibration = None
@@ -362,7 +425,8 @@ class RBTReviewApp(tk.Tk):
         self.active_tick_distance_cm = None
         self.active_tick_sequence_index = None
         self.canvas.delete("all")
-        self.canvas.config(width=640, height=480, bg="#000000")
+        self.canvas.config(width=self.display_width, height=self.display_height, bg="#000000")
+        self._schedule_display_fit()
         self.slider.configure(to=0)
         self.updating_slider = True
         self.slider.set(0)
@@ -735,7 +799,11 @@ class RBTReviewApp(tk.Tk):
         self.frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
         self.video_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
         self.video_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
-        self.canvas.config(width=self.video_width, height=self.video_height)
+        self.display_scale = 1.0
+        self.display_width = self.video_width
+        self.display_height = self.video_height
+        self.canvas.config(width=self.display_width, height=self.display_height)
+        self._schedule_display_fit()
         self.slider.configure(to=max(self.frame_count - 1, 0))
         self.marks = self._loaded_marks_for(trial_video)
         self.load_scoring_fields(trial_video)
@@ -818,11 +886,20 @@ class RBTReviewApp(tk.Tk):
         pending = self.pending_calibration is not None
         color = "#ffe066" if pending else "#5cffc7"
         label_color = "#fff2a8" if pending else "#d6fff2"
+        line_half = 14 * self.display_scale
+        dot_radius = max(2, 3 * self.display_scale)
+        line_width = max(1, int(round(2 * self.display_scale)))
         for tick in calibration.ticks:
-            self.canvas.create_line(tick.x, tick.y - 14, tick.x, tick.y + 14, fill=color, width=2)
-            self.canvas.create_oval(tick.x - 3, tick.y - 3, tick.x + 3, tick.y + 3, outline=color, width=2)
-            self.canvas.create_text(tick.x + 5, tick.y - 18, text=f"{tick.distance_cm}", fill=label_color, anchor="w")
-
+            x, y = self._canvas_point(tick.x, tick.y)
+            self.canvas.create_line(x, y - line_half, x, y + line_half, fill=color, width=line_width)
+            self.canvas.create_oval(x - dot_radius, y - dot_radius, x + dot_radius, y + dot_radius, outline=color, width=line_width)
+            self.canvas.create_text(
+                x + 5 * self.display_scale,
+                y - 18 * self.display_scale,
+                text=f"{tick.distance_cm}",
+                fill=label_color,
+                anchor="w",
+            )
     def toggle_detection_overlay(self) -> None:
         if self.cap is None:
             self.update_detection_label(None)
@@ -924,8 +1001,7 @@ class RBTReviewApp(tk.Tk):
             self.status_var.set("Choose a Trial Outcome mark or Distance Interval Calibration action before clicking.")
             return
 
-        x = int(max(0, min(event.x, self.video_width - 1)))
-        y = int(max(0, min(event.y, self.video_height - 1)))
+        x, y = self._video_point(event.x, event.y)
         self.marks[self.active_mark] = PawMark(self.current_frame, x, y)
         marked_kind = self.active_mark
         if marked_kind == "stop" and self.outcome_var.get() == OUTCOME_FELL:
@@ -955,8 +1031,7 @@ class RBTReviewApp(tk.Tk):
             self.active_tick_sequence_index = None
             return
 
-        x = int(max(0, min(event.x, self.video_width - 1)))
-        y = int(max(0, min(event.y, self.video_height - 1)))
+        x, y = self._video_point(event.x, event.y)
         distance_cm = BEAM_TICK_MARKS_CM[self.active_tick_sequence_index]
         self.pending_calibration = calibration_with_replaced_tick(calibration, distance_cm, x, y)
         self.active_tick_sequence_index += 1
@@ -979,8 +1054,7 @@ class RBTReviewApp(tk.Tk):
             self.active_tick_distance_cm = None
             return
 
-        x = int(max(0, min(event.x, self.video_width - 1)))
-        y = int(max(0, min(event.y, self.video_height - 1)))
+        x, y = self._video_point(event.x, event.y)
         distance_cm = self.active_tick_distance_cm
         self.pending_calibration = calibration_with_replaced_tick(calibration, distance_cm, x, y)
         self.active_tick_distance_cm = None
@@ -1326,26 +1400,64 @@ class RBTReviewApp(tk.Tk):
 
     def draw_mark_overlays(self) -> None:
         for kind, mark in self.marks.items():
-            if mark.frame > self.current_frame: continue
+            if mark.frame > self.current_frame:
+                continue
             is_fall = kind == "stop" and self.outcome_var.get() == OUTCOME_FELL
-            x,y=mark.x,mark.y
+            x, y = mark.x, mark.y
             if is_fall and self.current_scoring_tracking is not None:
-                prediction=self.current_scoring_tracking.points_for_frame(mark.frame)
-                if prediction is not None and prediction.body_center is not None: x,y=int(round(prediction.body_center.x)),int(round(prediction.body_center.y))
-            color="#ff4d4d" if is_fall else "#36e07a"; label="fall" if is_fall else ("0 cm start" if kind=="start" else "120 cm end")
-            radius=10; self.canvas.create_oval(x-radius,y-radius,x+radius,y+radius,outline=color,width=3); self.canvas.create_text(x+13,y-13,text=label,fill=color,anchor="w")
+                prediction = self.current_scoring_tracking.points_for_frame(mark.frame)
+                if prediction is not None and prediction.body_center is not None:
+                    x = int(round(prediction.body_center.x))
+                    y = int(round(prediction.body_center.y))
 
+            display_x, display_y = self._canvas_point(x, y)
+            color = "#ff4d4d" if is_fall else "#36e07a"
+            label = "fall" if is_fall else ("0 cm start" if kind == "start" else "120 cm end")
+            radius = max(8, 10 * self.display_scale)
+            line_width = max(1, int(round(3 * self.display_scale)))
+            self.canvas.create_oval(
+                display_x - radius,
+                display_y - radius,
+                display_x + radius,
+                display_y + radius,
+                outline=color,
+                width=line_width,
+            )
+            self.canvas.create_text(
+                display_x + 13 * self.display_scale,
+                display_y - 13 * self.display_scale,
+                text=label,
+                fill=color,
+                anchor="w",
+            )
     def show_frame(self, frame_number: int) -> None:
-        if self.cap is None: return
-        if self.current_video is not None and self.tracking_video_path != self.current_video.path: self._load_tracking(self.current_video)
-        frame_number=max(0,min(frame_number,max(self.frame_count-1,0))); self.cap.set(cv2.CAP_PROP_POS_FRAMES,frame_number); ok,frame=self.cap.read()
-        if not ok: self.pause(); return
-        self.current_frame=frame_number; prediction=self.current_tracking.points_for_frame(frame_number) if self.current_tracking else None
-        display=draw_tracking_overlay(frame,prediction) if self.detection_enabled_var.get() else frame
-        if self.detection_enabled_var.get(): self.detection_status_var.set("DLC model tracking" if prediction else "No DLC CSV for this frame")
-        rgb=cv2.cvtColor(display,cv2.COLOR_BGR2RGB); self.photo=ImageTk.PhotoImage(image=Image.fromarray(rgb)); self.canvas.delete("all"); self.canvas.create_image(0,0,anchor="nw",image=self.photo)
-        self.draw_tick_overlays(); self.draw_mark_overlays(); self.updating_slider=True; self.slider.set(frame_number); self.updating_slider=False; self.frame_var.set(f"Frame {frame_number+1}/{max(self.frame_count,1)}"); self.time_var.set(f"{self.frame_time(frame_number):.2f} sec")
+        if self.cap is None:
+            return
+        if self.current_video is not None and self.tracking_video_path != self.current_video.path:
+            self._load_tracking(self.current_video)
+        frame_number = max(0, min(frame_number, max(self.frame_count - 1, 0)))
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+        ok, frame = self.cap.read()
+        if not ok:
+            self.pause()
+            return
 
+        self.current_frame = frame_number
+        prediction = self.current_tracking.points_for_frame(frame_number) if self.current_tracking else None
+        display = draw_tracking_overlay(frame, prediction) if self.detection_enabled_var.get() else frame
+        if self.detection_enabled_var.get():
+            self.detection_status_var.set("DLC model tracking" if prediction else "No DLC CSV for this frame")
+        rgb = cv2.cvtColor(display, cv2.COLOR_BGR2RGB)
+        self.photo = ImageTk.PhotoImage(image=self._canvas_image(rgb))
+        self.canvas.delete("all")
+        self.canvas.create_image(0, 0, anchor="nw", image=self.photo)
+        self.draw_tick_overlays()
+        self.draw_mark_overlays()
+        self.updating_slider = True
+        self.slider.set(frame_number)
+        self.updating_slider = False
+        self.frame_var.set(f"Frame {frame_number + 1}/{max(self.frame_count, 1)}")
+        self.time_var.set(f"{self.frame_time(frame_number):.2f} sec")
     def _finish_analysis(self,videos,code,output):
         if code:self.status_var.set(output.splitlines()[-1] if output else "Tracking failed.");return
         saved=self._save_auto_batch(videos)
