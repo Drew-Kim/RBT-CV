@@ -1,37 +1,49 @@
-# Local Python environments
+# Local environments and Python build files
 .venv/
 .venv-dlc/
 venv/
 env/
 ENV/
-
-# Python caches, build artifacts, and test artifacts
 __pycache__/
 *.py[cod]
-*$py.class
-.Python
-.coverage
-.coverage.*
-.eggs/
-.hypothesis/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-.ipynb_checkpoints/
+.coverage*
 build/
 dist/
 *.egg-info/
 
-# Generated RBT-CV outputs
-outputs/
+# Experimental data and generated RBT results -- never commit
+/data/
+/res/
+/outputs/
+*.csv
+*.xls
+*.xlsx
+*.xlsb
 
-# DeepLabCut/model outputs are large and regenerated locally
-models/
-dlc-models/
-evaluation-results/
-training-datasets/
-labeled-data/
-videos/
+# DeepLabCut projects, labels, extracted frames, and trained models -- never commit
+/models/
+/dlc-models/
+/training-datasets/
+/labeled-data/
+/evaluation-results/
+/videos/
+/extracted-frames/
+/extracted_frames/
+
+# Raw video files, even if they are copied outside data/
+*.avi
+*.mp4
+*.mov
+*.mkv
+*.mpeg
+*.mpg
+*.wmv
+*.webm
+
+# Model weights and DeepLabCut training artefacts, wherever they are created
 *.h5
 *.hdf5
 *.pickle
@@ -39,26 +51,21 @@ videos/
 *.pt
 *.pth
 *.ckpt
+*.ckpt.*
 *.onnx
+*.tflite
 *.pb
+*.weights
 *.npy
 *.npz
+snapshot-*
+events.out.tfevents.*
+*.index
+*.data-*
 
-# Local data files are large and should not be committed.
-data/
-res/
-*.avi
-*.mp4
-*.mov
-*.xlsb
-*.xlsx
-*.csv
-
-# Local secrets/config
+# Local settings and editor/operating-system files
 .env
 .env.*
-
-# OS/editor noise
 .DS_Store
 Thumbs.db
 .vscode/

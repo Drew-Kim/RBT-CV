@@ -88,8 +88,3 @@ def result_text(outcome: str, raw_crossing_time: float | None, scored_time: floa
         return f"Scored time {FALL_MAX_SECONDS:.2f} sec | fall distance {distance_cm} cm"
 
     return f"Crossing time {scored_time:.2f} sec | distance {BEAM_LENGTH_CM} cm"
-
-def distance_status_text(outcome: str, distance_cm: int | float | str) -> str:
-    """Legacy GUI label text backed by the current 5 cm scoring rules."""
-    distance = distance_for_outcome(outcome, normalize_distance_cm(distance_cm))
-    return "Reached platform: 120 cm" if normalize_outcome(outcome) == OUTCOME_REACHED else f"Fall distance: {distance} cm"

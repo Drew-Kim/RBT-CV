@@ -22,6 +22,11 @@ RUNNING = "running"
 FELL = "fell"
 REACHED = "reached"
 FALL_BOUNDARY_MARGIN_PX = 15.0
+# DLC points can sit a couple of pixels short of a tick even when the paw has
+# visibly reached the platform. Require two consecutive high-confidence frames
+# inside this small endpoint zone so a one-frame wobble cannot finish a trial.
+ENDPOINT_TOLERANCE_PX = 3.0
+ENDPOINT_CONFIRMATION_FRAMES = 2
 
 
 @dataclass(frozen=True)
@@ -79,6 +84,7 @@ def analyze_tracking_timeline(tracking: DLCTracking, calibration: BeamCalibratio
     end_frame: int | None = None
     farthest_distance_cm = 0
     previous_back_paw: DLCPoint | None = None
+    endpoint_frames = 0
 
     for frame_number in frame_numbers:
         prediction = tracking.frames[frame_number]
@@ -114,7 +120,20 @@ def analyze_tracking_timeline(tracking: DLCTracking, calibration: BeamCalibratio
             ):
                 state = FELL
                 end_frame = frame_number
-            elif _crossed_vertical_tick(previous_back_paw, back_paw, end_tick.x, direction):
+            else:
+                endpoint_frames = _endpoint_frame_count(
+                    endpoint_frames,
+                    back_paw,
+                    end_tick.x,
+                    direction,
+                )
+            if (
+                state == RUNNING
+                and (
+                    _crossed_vertical_tick(previous_back_paw, back_paw, end_tick.x, direction)
+                    or endpoint_frames >= ENDPOINT_CONFIRMATION_FRAMES
+                )
+            ):
                 state = REACHED
                 end_frame = frame_number
                 farthest_distance_cm = BEAM_LENGTH_CM
@@ -181,3 +200,15 @@ def _crossed_vertical_tick(
 def _at_or_past_vertical_tick(current: DLCPoint | None, tick_x: float, direction: int) -> bool:
     """Fallback when the only low-confidence frame is the 0 cm crossing itself."""
     return current is not None and ((current.x - tick_x) * direction) >= 0
+
+
+def _endpoint_frame_count(
+    previous_count: int,
+    current: DLCPoint | None,
+    tick_x: float,
+    direction: int,
+) -> int:
+    if current is None:
+        return 0
+    position = (current.x - tick_x) * direction
+    return previous_count + 1 if position >= -ENDPOINT_TOLERANCE_PX else 0

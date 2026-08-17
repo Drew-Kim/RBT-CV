@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 import subprocess
 import threading
@@ -12,7 +13,13 @@ from PIL import Image, ImageTk
 
 from .annotations import AnnotationStore, TrialAnnotation, now_stamp
 from .dataset import DatasetIndex, ROOT, TrialVideo
-from .detection import (MouseDetection, MouseLimbDetector, draw_detection_overlay, DLCPredictionStore, DISPLAY_LIKELIHOOD_CUTOFF, SCORING_LIKELIHOOD_CUTOFF, DLCTracking, draw_tracking_overlay)
+from .detection import (
+    DISPLAY_LIKELIHOOD_CUTOFF,
+    SCORING_LIKELIHOOD_CUTOFF,
+    DLCPredictionStore,
+    DLCTracking,
+    draw_tracking_overlay,
+)
 from .scoring import (
     BEAM_LENGTH_CM,
     BEAM_TICK_MARKS_CM,
@@ -21,7 +28,6 @@ from .scoring import (
     OUTCOME_REACHED,
     PawMark,
     distance_for_outcome,
-    distance_status_text,
     max_time_applied,
     normalize_distance_cm,
     normalize_outcome,
@@ -33,11 +39,9 @@ from .scoring import (
 from .results_workbook import ResultsWorkbook, ResultsWorkbookError
 from .tail_position import TailPositionStore
 from .tracking_rules import FELL, REACHED, analyze_tracking_timeline
-from .detection import DEFAULT_DLC_PREDICTIONS_DIR
 
 from .ticks import (
     BeamCalibration,
-    BeamTickDetector,
     TickCalibrationStore,
     DLCTickDetector,
     calibration_from_detection,
@@ -62,7 +66,6 @@ class RBTReviewApp(tk.Tk):
         self.dataset: DatasetIndex | None = None
         self.annotation_store = AnnotationStore()
         self.saved_annotations = self.annotation_store.load_by_video()
-        self.detector = MouseLimbDetector()
         self.tracking_store = DLCPredictionStore(likelihood_cutoff=DISPLAY_LIKELIHOOD_CUTOFF)
         self.dlc_tick_detector = DLCTickDetector()
         self.results_workbook = ResultsWorkbook()
@@ -73,7 +76,6 @@ class RBTReviewApp(tk.Tk):
         self.tracking_video_path: Path | None = None
         self.tick_store = TickCalibrationStore()
         self.saved_tick_calibrations = self.tick_store.load_by_key()
-        self.tick_detector = BeamTickDetector()
 
         self.cap: cv2.VideoCapture | None = None
         self.current_video: TrialVideo | None = None
@@ -89,9 +91,7 @@ class RBTReviewApp(tk.Tk):
         self.photo: ImageTk.PhotoImage | None = None
         self.playing = False
         self.after_id: str | None = None
-        self.active_mark: str | None = None
         self.active_tick_distance_cm: int | None = None
-        self.active_tick_sequence_index: int | None = None
         self.marks: dict[str, PawMark] = {}
         self.current_calibration: BeamCalibration | None = None
         self.pending_calibration: BeamCalibration | None = None
@@ -102,21 +102,16 @@ class RBTReviewApp(tk.Tk):
         self.status_var = tk.StringVar(value="Ready")
         self.frame_var = tk.StringVar(value="Frame -")
         self.time_var = tk.StringVar(value="Time -")
-        self.start_var = tk.StringVar(value="Start not marked")
-        self.stop_var = tk.StringVar(value="Stop not marked")
         self.result_var = tk.StringVar(value="Crossing time -")
         self.detection_enabled_var = tk.BooleanVar(value=False)
-        self.detection_status_var = tk.StringVar(value="Overlay off")
         self.tick_overlay_var = tk.BooleanVar(value=True)
         self.tick_status_var = tk.StringVar(value="No tick calibration")
         self.tick_edit_distance_var = tk.IntVar(value=0)
         self.outcome_var = tk.StringVar(value=OUTCOME_REACHED)
         self.distance_var = tk.IntVar(value=BEAM_LENGTH_CM)
-        self.distance_status_var = tk.StringVar(value="Distance 120 cm")
 
         self.subject_labels: list[tuple[str, str]] = []
         self.trial_buttons: dict[int, ttk.Button] = {}
-        self.stop_mark_button: ttk.Button | None = None
 
         self._build_ui()
         self._bind_keys()
@@ -204,28 +199,35 @@ class RBTReviewApp(tk.Tk):
         self.open_trial(1)
 
     def _build_detection_controls(self, sidebar: ttk.Frame) -> None:
-        detection_box = ttk.LabelFrame(sidebar, text="Mouse Detection", padding=8)
-        detection_box.grid(row=7, column=0, sticky="ew", pady=(0, 10))
-        ttk.Checkbutton(
-            detection_box,
-            text="Show mouse/limb overlay",
-            variable=self.detection_enabled_var,
-            command=self.toggle_detection_overlay,
-        ).grid(row=0, column=0, sticky="w")
-        ttk.Label(detection_box, textvariable=self.detection_status_var, wraplength=220).grid(
-            row=1, column=0, sticky="w", pady=(6, 0)
-        )
-        detection_box.columnconfigure(0, weight=1)
+        box = ttk.LabelFrame(sidebar, text="DeepLabCut Tracking", padding=6)
+        box.grid(row=7, column=0, sticky="ew", pady=(0, 8))
+        box.columnconfigure(0, weight=1)
 
-    def _build_detection_controls(self, sidebar: ttk.Frame) -> None:
-        box = ttk.LabelFrame(sidebar, text="DeepLabCut Tracking", padding=8)
-        box.grid(row=7, column=0, sticky="ew", pady=(0, 10))
         self.detection_enabled_var.set(True)
-        ttk.Checkbutton(box, text="Show live tracking (>= 0.20)", variable=self.detection_enabled_var, command=lambda: self.show_frame(self.current_frame)).grid(row=0, column=0, sticky="w")
-        ttk.Button(box, text="Analyze Current Trial", command=self.analyze_current_tracking).grid(row=1, column=0, sticky="ew", pady=(6,0))
-        ttk.Button(box, text="Analyze Selected Animal (T1-T3)", command=self.analyze_selected_animal).grid(row=2, column=0, sticky="ew", pady=(4,0))
-        ttk.Button(box, text="Analyze Selected Day", command=self.analyze_selected_day).grid(row=3, column=0, sticky="ew", pady=(4,0))
-        ttk.Label(box, textvariable=self.detection_status_var, wraplength=220).grid(row=4, column=0, sticky="w", pady=(6,0))
+        ttk.Checkbutton(
+            box,
+            text="Show live tracking (>= 0.20)",
+            variable=self.detection_enabled_var,
+            command=lambda: self.show_frame(self.current_frame),
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Button(
+            box,
+            text="Analyze Current Trial",
+            command=self.analyze_current_tracking,
+        ).grid(row=1, column=0, sticky="ew", pady=(5, 0))
+        ttk.Button(
+            box,
+            text="Analyze Selected Animal (T1-T3)",
+            command=self.analyze_selected_animal,
+        ).grid(row=2, column=0, sticky="ew", pady=(4, 0))
+        ttk.Button(
+            box,
+            text="Analyze Selected Day",
+            command=self.analyze_selected_day,
+        ).grid(row=3, column=0, sticky="ew", pady=(4, 0))
+
+
+
     def _build_tick_controls(self, sidebar: ttk.Frame) -> None:
         tick_box = ttk.LabelFrame(sidebar, text="Distance Interval Calibration", padding=6)
         tick_box.grid(row=6, column=0, sticky="ew", pady=(0, 8))
@@ -429,9 +431,7 @@ class RBTReviewApp(tk.Tk):
         self.marks = {}
         self.current_calibration = None
         self.pending_calibration = None
-        self.active_mark = None
         self.active_tick_distance_cm = None
-        self.active_tick_sequence_index = None
         self.canvas.delete("all")
         self.canvas.config(width=self.display_width, height=self.display_height, bg="#000000")
         self._schedule_display_fit()
@@ -441,8 +441,6 @@ class RBTReviewApp(tk.Tk):
         self.updating_slider = False
         self.frame_var.set("Frame -")
         self.time_var.set("Time -")
-        self.start_var.set("Start not marked")
-        self.stop_var.set("Stop not marked")
         self.result_var.set("Crossing time -")
 
     def _reset_dataset_ui(self) -> None:
@@ -459,7 +457,6 @@ class RBTReviewApp(tk.Tk):
         self.dataset_label.configure(text="No video folder selected")
         self.reload_button.configure(state="disabled")
         self.tick_status_var.set("Choose a video folder first.")
-        self.detection_status_var.set("Choose a video folder first.")
         self.status_var.set("Choose a video folder to begin.")
 
     def _populate_days(self) -> None:
@@ -539,11 +536,18 @@ class RBTReviewApp(tk.Tk):
     def active_tick_calibration(self) -> BeamCalibration | None:
         return self.pending_calibration or self.current_calibration
 
+    def calibration_for_video(self, trial_video: TrialVideo) -> BeamCalibration | None:
+        """Use a T2/T3 recalibration when present; otherwise use the shared T1 calibration."""
+        trial_key = calibration_key(trial_video, trial_specific=trial_video.trial != 1)
+        return (
+            self.saved_tick_calibrations.get(trial_key)
+            or self.saved_tick_calibrations.get(calibration_key(trial_video))
+        )
+
     def load_tick_calibration(self, trial_video: TrialVideo) -> None:
         self.active_tick_distance_cm = None
-        self.active_tick_sequence_index = None
         self.pending_calibration = None
-        self.current_calibration = self.saved_tick_calibrations.get(calibration_key(trial_video))
+        self.current_calibration = self.calibration_for_video(trial_video)
         if self.current_calibration is not None:
             self.tick_status_var.set(
                 f"Confirmed ticks loaded from T{self.current_calibration.source_trial} for this mouse/day."
@@ -551,48 +555,25 @@ class RBTReviewApp(tk.Tk):
             return
 
         if trial_video.trial == 1:
-            self.tick_status_var.set("No tick calibration. Use Auto-detect draft or Click 0-120 on T1.")
+            self.tick_status_var.set("No tick calibration. Detect or edit T1 ticks, then confirm intervals.")
         else:
-            self.tick_status_var.set("No tick calibration. Open T1 for this mouse/day and confirm ticks.")
+            self.tick_status_var.set("No tick calibration. Detect this trial for a trial-specific recalibration, or use its T1 ticks.")
 
-    def auto_detect_ticks(self, refresh: bool = True) -> None:
-        if self.current_video is None:
-            self.tick_status_var.set("Load T1 before detecting tick marks.")
-            return
-
-        self.pause()
-        self.tick_status_var.set("Detecting tick marks from early frames...")
-        self.update_idletasks()
-        detection = self.tick_detector.detect_from_video(self.current_video.path)
-        if detection.ticks:
-            self.pending_calibration = calibration_from_detection(self.current_video, detection, confirmed_at="")
-            note = "This is a CV draft; confirm intervals only if every tick is on the true video mark."
-            if self.current_video.trial != 1:
-                note = "Open T1 before confirming this calibration."
-            self.tick_status_var.set(f"{detection.message}. {note}")
-        else:
-            self.pending_calibration = None
-            self.tick_status_var.set(f"{detection.message}. Use Click 0-120 to calibrate exact marks.")
-
-        self.update_fall_distance_from_calibration()
-        if refresh:
-            self.refresh_frame()
 
     def confirm_tick_calibration(self) -> None:
         if self.current_video is None:
             self.tick_status_var.set("Load T1 before confirming tick marks.")
             return
-        if self.current_video.trial != 1:
-            messagebox.showwarning("Open T1", "Tick calibration should be confirmed from T1 for this mouse/day.")
-            return
-
         calibration = self.active_tick_calibration()
         if calibration is None or not calibration.ticks:
             messagebox.showwarning("No ticks", "Auto-detect or set tick marks before confirming.")
             return
 
         confirmed = BeamCalibration(
-            key=calibration_key(self.current_video),
+            key=calibration_key(
+                self.current_video,
+                trial_specific=self.current_video.trial != 1,
+            ),
             dataset=self.current_video.dataset,
             day=self.current_video.day,
             cage=self.current_video.cage_number,
@@ -608,8 +589,8 @@ class RBTReviewApp(tk.Tk):
         self.current_calibration = confirmed
         self.pending_calibration = None
         self.active_tick_distance_cm = None
-        self.active_tick_sequence_index = None
-        self.tick_status_var.set("Confirmed interval calibration saved for this mouse/day.")
+        scope = "this mouse/day" if self.current_video.trial == 1 else f"this T{self.current_video.trial} trial"
+        self.tick_status_var.set(f"Confirmed interval calibration saved for {scope}.")
         self.update_fall_distance_from_calibration()
         self.refresh_frame()
 
@@ -620,7 +601,10 @@ class RBTReviewApp(tk.Tk):
         if calibration is not None:
             return calibration
         return BeamCalibration(
-            key=calibration_key(self.current_video),
+            key=calibration_key(
+                self.current_video,
+                trial_specific=self.current_video.trial != 1,
+            ),
             dataset=self.current_video.dataset,
             day=self.current_video.day,
             cage=self.current_video.cage_number,
@@ -632,33 +616,11 @@ class RBTReviewApp(tk.Tk):
             confirmed_at="",
         )
 
-    def begin_tick_sequence(self) -> None:
-        if self.current_video is None:
-            self.tick_status_var.set("Load T1 before calibrating tick marks.")
-            return
-        if self.current_video.trial != 1:
-            messagebox.showwarning("Open T1", "Calibrate and confirm tick marks on T1 for this mouse/day.")
-            return
-
-        calibration = self.editable_calibration_for_current_video()
-        if calibration is None:
-            return
-        self.pending_calibration = calibration
-        self.active_mark = None
-        self.active_tick_distance_cm = None
-        self.active_tick_sequence_index = 0
-        self.pause()
-        first_distance = BEAM_TICK_MARKS_CM[0]
-        self.tick_status_var.set(f"Click the true {first_distance} cm tick mark.")
 
     def begin_tick_edit(self) -> None:
         if self.current_video is None:
             self.tick_status_var.set("Load T1 before editing tick marks.")
             return
-        if self.current_video.trial != 1:
-            messagebox.showwarning("Open T1", "Edit and confirm tick marks on T1 for this mouse/day.")
-            return
-
         calibration = self.editable_calibration_for_current_video()
         if calibration is None:
             return
@@ -668,8 +630,6 @@ class RBTReviewApp(tk.Tk):
         except (tk.TclError, ValueError):
             distance_cm = 0
         self.pending_calibration = calibration
-        self.active_mark = None
-        self.active_tick_sequence_index = None
         self.active_tick_distance_cm = distance_cm
         self.pause()
         self.tick_status_var.set(f"Click the {distance_cm} cm tick mark in the video.")
@@ -689,7 +649,6 @@ class RBTReviewApp(tk.Tk):
             self.set_distance_cm(self.current_distance_cm())
 
         self.update_distance_controls()
-        self.update_mark_labels()
         self.update_result_labels()
         if self.cap is not None:
             self.show_frame(self.current_frame)
@@ -697,7 +656,6 @@ class RBTReviewApp(tk.Tk):
     def on_distance_changed(self) -> None:
         self.set_distance_cm(self.current_distance_cm())
         self.update_distance_controls()
-        self.update_mark_labels()
         self.update_result_labels()
         if self.cap is not None:
             self.show_frame(self.current_frame)
@@ -713,25 +671,10 @@ class RBTReviewApp(tk.Tk):
         return distance_for_outcome(self.outcome_var.get(), selected_distance)
 
     def update_distance_controls(self) -> None:
-        outcome = self.outcome_var.get()
-        if outcome == OUTCOME_FELL:
-            self.distance_combo.configure(state="readonly")
-        else:
-            self.distance_combo.configure(state="disabled")
-        status = distance_status_text(outcome, self.current_distance_cm())
-        if outcome == OUTCOME_FELL:
-            if self.active_tick_calibration() is not None:
-                status += " | using confirmed/pending ticks"
-            else:
-                status += " | no tick calibration; choose manually"
-        self.distance_status_var.set(status)
-        self.update_stop_mark_button()
+        state = "readonly" if self.outcome_var.get() == OUTCOME_FELL else "disabled"
+        self.distance_combo.configure(state=state)
 
-    def update_stop_mark_button(self) -> None:
-        if self.stop_mark_button is None:
-            return
-        text = "Mark Fall" if self.outcome_var.get() == OUTCOME_FELL else "Mark Target"
-        self.stop_mark_button.configure(text=text)
+
 
     def update_fall_distance_from_calibration(self) -> bool:
         if self.outcome_var.get() != OUTCOME_FELL:
@@ -819,9 +762,7 @@ class RBTReviewApp(tk.Tk):
         self.update_fall_distance_from_calibration()
         self.current_frame = 0
         self.show_frame(0)
-        self.update_mark_labels()
         self.update_result_labels()
-        self.update_detection_label(None)
         self.status_var.set(f"Loaded {trial_video.relative_path}")
 
     def _loaded_marks_for(self, trial_video: TrialVideo) -> dict[str, PawMark]:
@@ -836,53 +777,7 @@ class RBTReviewApp(tk.Tk):
         except (KeyError, ValueError):
             return {}
 
-    def show_frame(self, frame_number: int) -> None:
-        if self.cap is None:
-            return
-        frame_number = max(0, min(frame_number, max(self.frame_count - 1, 0)))
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
-        ok, frame = self.cap.read()
-        if not ok:
-            self.pause()
-            return
 
-        self.current_frame = frame_number
-        display_frame = frame
-        if self.detection_enabled_var.get():
-            detection = self.detector.detect(frame)
-            display_frame = draw_detection_overlay(frame, detection)
-            self.update_detection_label(detection)
-        else:
-            self.update_detection_label(None)
-
-        rgb = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
-        image = Image.fromarray(rgb)
-        self.photo = ImageTk.PhotoImage(image=image)
-        self.canvas.delete("all")
-        self.canvas.create_image(0, 0, anchor="nw", image=self.photo)
-        self.draw_tick_overlays()
-        self.draw_mark_overlays()
-
-        self.updating_slider = True
-        self.slider.set(frame_number)
-        self.updating_slider = False
-        self.frame_var.set(f"Frame {frame_number + 1}/{max(self.frame_count, 1)}")
-        self.time_var.set(f"{self.frame_time(frame_number):.2f} sec")
-
-    def draw_mark_overlays(self) -> None:
-        colors = {"start": "#00d4ff", "stop": "#ff4d8d"}
-        for kind, mark in self.marks.items():
-            if mark.frame != self.current_frame:
-                continue
-            color = colors[kind]
-            label = kind
-            if kind == "stop":
-                label = f"fall {self.current_distance_cm()} cm" if self.outcome_var.get() == OUTCOME_FELL else "target 120 cm"
-            r = 6
-            self.canvas.create_oval(mark.x - r, mark.y - r, mark.x + r, mark.y + r, outline=color, width=3)
-            self.canvas.create_line(mark.x - 10, mark.y, mark.x + 10, mark.y, fill=color, width=2)
-            self.canvas.create_line(mark.x, mark.y - 10, mark.x, mark.y + 10, fill=color, width=2)
-            self.canvas.create_text(mark.x + 12, mark.y - 12, text=label, fill=color, anchor="w")
 
     def draw_tick_overlays(self) -> None:
         if not self.tick_overlay_var.get():
@@ -908,31 +803,7 @@ class RBTReviewApp(tk.Tk):
                 fill=label_color,
                 anchor="w",
             )
-    def toggle_detection_overlay(self) -> None:
-        if self.cap is None:
-            self.update_detection_label(None)
-            return
-        self.show_frame(self.current_frame)
 
-    def update_detection_label(self, detection: MouseDetection | None) -> None:
-        if not self.detection_enabled_var.get():
-            self.detection_status_var.set("Overlay off")
-            return
-        if self.cap is None:
-            self.detection_status_var.set("Overlay on; load a trial")
-            return
-        if detection is None:
-            self.detection_status_var.set("Overlay on")
-            return
-        if not detection.found or detection.bbox is None:
-            self.detection_status_var.set(detection.message or "Mouse not detected")
-            return
-
-        x, y, w, h = detection.bbox
-        limb_count = len(detection.limb_candidates)
-        self.detection_status_var.set(
-            f"Mouse {detection.confidence:.2f}, box {w}x{h} at ({x},{y}), {limb_count} limb candidates"
-        )
 
     def frame_time(self, frame_number: int) -> float:
         return frame_number / self.fps if self.fps else 0.0
@@ -978,83 +849,16 @@ class RBTReviewApp(tk.Tk):
         delay_ms = max(1, int(1000 / (self.fps or 15.0)))
         self.after_id = self.after(delay_ms, self.schedule_next_frame)
 
-    def begin_mark(self, kind: str) -> None:
-        if self.cap is None:
-            self.status_var.set("Load a trial before marking.")
-            return
-        self.pause()
-        self.active_mark = kind
-        self.active_tick_distance_cm = None
-        self.active_tick_sequence_index = None
-        if kind == "stop" and self.outcome_var.get() == OUTCOME_FELL:
-            if self.active_tick_calibration() is not None:
-                self.status_var.set("Click where the mouse fell; distance will be estimated from the confirmed tick marks.")
-            else:
-                self.status_var.set("Click where the mouse fell, then choose the distance from the visible video ticks.")
-        elif kind == "stop":
-            self.status_var.set("Click the hind paw when it touches the target platform.")
-        else:
-            self.status_var.set("Click the hind paw as it leaves the start platform.")
 
     def on_canvas_click(self, event: tk.Event) -> None:
         if self.cap is None:
             return
-        if self.active_tick_sequence_index is not None:
-            self.place_tick_sequence_from_click(event)
+        if self.active_tick_distance_cm is None:
+            self.status_var.set("Use Set from click before selecting a tick position.")
             return
-        if self.active_tick_distance_cm is not None:
-            self.place_tick_from_click(event)
-            return
-        if self.active_mark is None:
-            self.status_var.set("Choose a Trial Outcome mark or Distance Interval Calibration action before clicking.")
-            return
+        self.place_tick_from_click(event)
 
-        x, y = self._video_point(event.x, event.y)
-        self.marks[self.active_mark] = PawMark(self.current_frame, x, y)
-        marked_kind = self.active_mark
-        if marked_kind == "stop" and self.outcome_var.get() == OUTCOME_FELL:
-            if self.update_fall_distance_from_calibration():
-                self.status_var.set(
-                    f"Marked fall at frame {self.current_frame + 1}, x={x}, y={y}. "
-                    f"Estimated distance {self.current_distance_cm()} cm."
-                )
-            else:
-                self.status_var.set(
-                    f"Marked fall at frame {self.current_frame + 1}, x={x}, y={y}. Choose/check distance from video ticks."
-                )
-        elif marked_kind == "stop":
-            self.set_distance_cm(BEAM_LENGTH_CM)
-            self.status_var.set(f"Marked target at frame {self.current_frame + 1}, x={x}, y={y}, distance=120 cm.")
-        else:
-            self.status_var.set(f"Marked start at frame {self.current_frame + 1}, x={x}, y={y}.")
-        self.active_mark = None
-        self.update_distance_controls()
-        self.update_mark_labels()
-        self.update_result_labels()
-        self.show_frame(self.current_frame)
 
-    def place_tick_sequence_from_click(self, event: tk.Event) -> None:
-        calibration = self.active_tick_calibration()
-        if calibration is None or self.active_tick_sequence_index is None:
-            self.active_tick_sequence_index = None
-            return
-
-        x, y = self._video_point(event.x, event.y)
-        distance_cm = BEAM_TICK_MARKS_CM[self.active_tick_sequence_index]
-        self.pending_calibration = calibration_with_replaced_tick(calibration, distance_cm, x, y)
-        self.active_tick_sequence_index += 1
-
-        if self.active_tick_sequence_index >= len(BEAM_TICK_MARKS_CM):
-            self.active_tick_sequence_index = None
-            self.tick_status_var.set("Clicked all tick marks. Confirm Intervals to save this calibration.")
-        else:
-            next_distance = BEAM_TICK_MARKS_CM[self.active_tick_sequence_index]
-            self.tick_status_var.set(f"Saved {distance_cm} cm. Click the true {next_distance} cm tick mark.")
-
-        self.update_fall_distance_from_calibration()
-        self.update_distance_controls()
-        self.update_result_labels()
-        self.show_frame(self.current_frame)
 
     def place_tick_from_click(self, event: tk.Event) -> None:
         calibration = self.active_tick_calibration()
@@ -1072,24 +876,7 @@ class RBTReviewApp(tk.Tk):
         self.update_result_labels()
         self.show_frame(self.current_frame)
 
-    def update_mark_labels(self) -> None:
-        self.start_var.set(self._mark_text("start"))
-        self.stop_var.set(self._mark_text("stop"))
 
-    def _mark_text(self, kind: str) -> str:
-        mark = self.marks.get(kind)
-        if kind == "stop" and self.outcome_var.get() == OUTCOME_FELL:
-            label = "Fall"
-            suffix = f", {self.current_distance_cm()} cm"
-        elif kind == "stop":
-            label = "Target"
-            suffix = ", 120 cm"
-        else:
-            label = kind.capitalize()
-            suffix = ""
-        if mark is None:
-            return f"{label} not marked"
-        return f"{label} F{mark.frame + 1} {self.frame_time(mark.frame):.2f}s ({mark.x},{mark.y}){suffix}"
 
     def raw_crossing_time(self) -> float | None:
         return raw_crossing_time_seconds(self.marks.get("start"), self.marks.get("stop"), self.fps)
@@ -1107,19 +894,27 @@ class RBTReviewApp(tk.Tk):
         if self.current_video is None:
             self.status_var.set("Load a trial before saving.")
             return
+
         start = self.marks.get("start")
         stop = self.marks.get("stop")
         if start is None or stop is None:
-            messagebox.showwarning("Missing marks", "Mark both start and end/fall before saving.")
+            messagebox.showwarning(
+                "Missing automatic result",
+                "Analyze the trial first so the start and terminal event are available.",
+            )
             return
+
         raw_crossing = self.raw_crossing_time()
         crossing = self.crossing_time()
         if crossing is None or raw_crossing is None or raw_crossing < 0:
-            messagebox.showwarning("Invalid timing", "End/fall frame must be after start frame.")
+            messagebox.showwarning(
+                "Invalid timing",
+                "The terminal event must be after the 0 cm start event.",
+            )
             return
+
         outcome = self.outcome_var.get()
         distance_cm = self.current_distance_cm()
-
         annotation = TrialAnnotation(
             relative_video=self.current_video.relative_path,
             dataset=self.current_video.dataset,
@@ -1142,17 +937,46 @@ class RBTReviewApp(tk.Tk):
             max_time_applied=max_time_applied(outcome),
             saved_at=now_stamp(),
         )
-        self.annotation_store.save(annotation)
+
         try:
+            self.annotation_store.save(annotation)
             self.results_workbook.save(annotation)
-            calibration = self.saved_tick_calibrations.get(calibration_key(self.current_video))
-            if calibration is not None and self.current_scoring_tracking is not None:
-                self.tail_position_store.record_trial(self.current_video, self.current_scoring_tracking, calibration, start.frame, stop.frame)
-        except ResultsWorkbookError as exc:
+        except (OSError, ResultsWorkbookError) as exc:
             self.status_var.set(f"Saved annotation, but Excel could not be written: {exc}")
             return
+
+        tail_refreshed = False
+        try:
+            calibration = self.calibration_for_video(self.current_video)
+            if calibration is not None and self.current_scoring_tracking is not None:
+                self.tail_position_store.record_trial(
+                    self.current_video,
+                    self.current_scoring_tracking,
+                    calibration,
+                    start.frame,
+                    stop.frame,
+                    refresh_plot=False,
+                )
+                tail_refreshed = (
+                    self.tail_position_store.refresh_day_plot(
+                        self.current_video.dataset,
+                        self.current_video.day,
+                    )
+                    is not None
+                )
+        except OSError as exc:
+            self.status_var.set(
+                f"Saved trial result, but the tail graph could not be updated: {exc}"
+            )
+            return
+
         self.saved_annotations = self.annotation_store.load_by_video()
-        self.status_var.set(f"Saved trial result: {crossing:.2f} sec, distance {distance_cm} cm.")
+        tail_message = " Tail graph refreshed." if tail_refreshed else ""
+        self.status_var.set(
+            f"Saved trial result: {crossing:.2f} sec, distance {distance_cm} cm."
+            f"{tail_message}"
+        )
+
 
     def destroy(self) -> None:
         self.pause()
@@ -1162,180 +986,220 @@ class RBTReviewApp(tk.Tk):
 
 
     # --- Restored DLC workflow -------------------------------------------------
-    def _runtime(self):
+    # DeepLabCut inference, automatic scoring, and result persistence.
+    def _runtime(self) -> tuple[Path, Path, Path, Path]:
         python = ROOT / ".venv-dlc" / "Scripts" / "python.exe"
-        script = ROOT / "scripts" / "dlc_tracking.py"
-        track = ROOT / "models" / "dlc_tracking" / "RBT_visible_front_back_tail-RBT_CV-2026-07-14" / "config.yaml"
-        tick = ROOT / "models" / "dlc_tickmarks" / "RBT_tick_landmarks-RBT_CV-2026-06-07" / "config.yaml"
-        return python, script, track, tick
+        runner = ROOT / "scripts" / "dlc_tracking.py"
+        tracking_config = (
+            ROOT
+            / "models"
+            / "dlc_tracking"
+            / "RBT_visible_front_back_tail-RBT_CV-2026-07-14"
+            / "config.yaml"
+        )
+        tick_config = (
+            ROOT
+            / "models"
+            / "dlc_tickmarks"
+            / "RBT_tick_landmarks-RBT_CV-2026-06-07"
+            / "config.yaml"
+        )
+        return python, runner, tracking_config, tick_config
 
-    def _run_dlc(self, args, done, message):
-        if self.dlc_running: self.status_var.set("A DLC task is already running."); return
-        python, script, _track, _tick = self._runtime()
-        if not python.exists() or not script.exists(): self.status_var.set("DeepLabCut environment is missing."); return
-        self.dlc_running=True; self.status_var.set(message)
-        def work():
-            try:
-                p=subprocess.run([str(python),str(script),*args],cwd=ROOT,capture_output=True,text=True)
-                code, out=p.returncode,(p.stdout or "")+(p.stderr or "")
-            except OSError as e: code,out=1,str(e)
-            self.after(0,lambda:(setattr(self,'dlc_running',False),done(code,out)))
-        threading.Thread(target=work,daemon=True).start()
+    def _save_calibration(self, video: TrialVideo, detection) -> bool:
+        if {tick.distance_cm for tick in detection.ticks} != set(BEAM_TICK_MARKS_CM):
+            return False
 
-    def _save_calibration(self, video, detection):
-        if {t.distance_cm for t in detection.ticks} != set(BEAM_TICK_MARKS_CM): return False
-        calibration=calibration_from_detection(video,detection,now_stamp()); self.tick_store.save(calibration)
-        self.saved_tick_calibrations=self.tick_store.load_by_key(); return True
+        calibration = calibration_from_detection(
+            video,
+            detection,
+            now_stamp(),
+            trial_specific=video.trial != 1,
+        )
+        self.tick_store.save(calibration)
+        self.saved_tick_calibrations = self.tick_store.load_by_key()
+        return True
 
-    def auto_detect_ticks(self, refresh=True):
-        if not self.current_video or self.current_video.trial != 1: self.tick_status_var.set("Open T1 before detecting ticks."); return
-        _p,_s,_track,tick=self._runtime(); video=self.current_video
-        self._run_dlc(["tick-analyze","--config",str(tick),"--video",str(video.path),"--early-frames","10"],lambda c,o:self._finish_tick(video,c,o),"Detecting Trial's Ticks...")
+    def auto_detect_ticks(self) -> None:
+        if self.current_video is None:
+            self.tick_status_var.set("Open a trial before detecting ticks.")
+            return
 
-    def _finish_tick(self, video, code, output):
-        if code: self.tick_status_var.set(output.splitlines()[-1] if output else "Tick model failed."); return
-        detection=self.dlc_tick_detector.detect_for_video(video)
-        if self._save_calibration(video,detection): self.load_tick_calibration(video); self.tick_status_var.set(f"Tick Calibration Complete. {len(detection.ticks)}/13 ticks found.")
-        else: self.tick_status_var.set(detection.message)
+        _python, _runner, _tracking_config, tick_config = self._runtime()
+        video = self.current_video
+        self._run_dlc(
+            [
+                "tick-analyze",
+                "--config",
+                str(tick_config),
+                "--video",
+                str(video.path),
+                "--early-frames",
+                "10",
+            ],
+            lambda code, output: self._finish_tick(video, code, output),
+            "Detecting Trial's Ticks...",
+        )
 
-    def auto_detect_day_ticks(self):
-        day=self.day_var.get(); videos=[v for v in self.dataset.videos if v.day==day and v.trial==1]
-        def next_(i=0, ok=0):
-            if i>=len(videos): self.saved_tick_calibrations=self.tick_store.load_by_key(); self.tick_status_var.set(f"Tick Calibration Complete. {ok}/{len(videos)} trials confirmed."); return
-            video=videos[i]; _p,_s,_track,tick=self._runtime()
-            self._run_dlc(["tick-analyze","--config",str(tick),"--video",str(video.path),"--early-frames","10"],lambda c,o:(self._save_calibration(video,self.dlc_tick_detector.detect_for_video(video)) if not c else False,next_(i+1,ok+(1 if not c and calibration_key(video) in self.tick_store.load_by_key() else 0))),f"Detecting {day} ticks {i+1}/{len(videos)}...")
-        if videos: next_()
+    def _finish_tick(self, video: TrialVideo, code: int, output: str) -> None:
+        if code:
+            self.tick_status_var.set(
+                output.splitlines()[-1] if output else "Tick model failed."
+            )
+            return
 
-    def _load_tracking(self, video):
-        path=self.tracking_store.find_for_video(video)
-        if not path: return False
-        self.current_tracking=self.tracking_store.load(path); self.current_scoring_tracking=self.current_tracking.filtered(SCORING_LIKELIHOOD_CUTOFF); return True
+        detection = self.dlc_tick_detector.detect_for_video(video)
+        if not self._save_calibration(video, detection):
+            self.tick_status_var.set(detection.message)
+            return
 
-    def _automatic_annotation(self, video):
-        cal = self.saved_tick_calibrations.get(calibration_key(video))
-        path = self.tracking_store.find_for_video(video)
-        if not cal or not path:
+        self.load_tick_calibration(video)
+        self.tick_status_var.set(
+            f"Tick Calibration Complete. {len(detection.ticks)}/13 ticks found."
+        )
+        if video == self.current_video:
+            self.refresh_frame()
+
+    def _automatic_annotation(
+        self,
+        video: TrialVideo,
+    ) -> tuple[TrialAnnotation, DLCTracking, BeamCalibration] | None:
+        calibration = self.calibration_for_video(video)
+        csv_path = self.tracking_store.find_for_video(video)
+        if calibration is None or csv_path is None:
             return None
+
         try:
-            tracking = self.tracking_store.load(path).filtered(SCORING_LIKELIHOOD_CUTOFF)
-            timeline = analyze_tracking_timeline(tracking, cal)
+            tracking = self.tracking_store.load(csv_path).filtered(
+                SCORING_LIKELIHOOD_CUTOFF
+            )
+            timeline = analyze_tracking_timeline(tracking, calibration)
         except (OSError, ValueError):
             return None
-        if timeline.final_state not in {FELL, REACHED} or timeline.start_frame is None or timeline.end_frame is None:
+
+        if (
+            timeline.final_state not in {FELL, REACHED}
+            or timeline.start_frame is None
+            or timeline.end_frame is None
+        ):
             return None
 
         outcome = OUTCOME_FELL if timeline.final_state == FELL else OUTCOME_REACHED
-        distance = timeline.farthest_distance_cm if outcome == OUTCOME_FELL else BEAM_LENGTH_CM
-        start_tick = point_for_distance(cal, 0)
-        end_tick = point_for_distance(cal, distance)
-        if not start_tick or not end_tick:
+        distance_cm = (
+            timeline.farthest_distance_cm
+            if outcome == OUTCOME_FELL
+            else BEAM_LENGTH_CM
+        )
+        start_tick = point_for_distance(calibration, 0)
+        end_tick = point_for_distance(calibration, distance_cm)
+        if start_tick is None or end_tick is None:
             return None
 
         stop_x, stop_y = end_tick.x, end_tick.y
         if outcome == OUTCOME_FELL:
             fall_state = timeline.state_at(timeline.end_frame)
-            if fall_state is not None and fall_state.body_center_x is not None and fall_state.body_center_y is not None:
+            if (
+                fall_state is not None
+                and fall_state.body_center_x is not None
+                and fall_state.body_center_y is not None
+            ):
                 stop_x = int(round(fall_state.body_center_x))
                 stop_y = int(round(fall_state.body_center_y))
 
-        cap = cv2.VideoCapture(str(video.path))
-        fps = float(cap.get(cv2.CAP_PROP_FPS) or 15)
-        cap.release()
+        capture = cv2.VideoCapture(str(video.path))
+        try:
+            fps = float(capture.get(cv2.CAP_PROP_FPS) or 15.0)
+        finally:
+            capture.release()
+
         start = PawMark(timeline.start_frame, start_tick.x, start_tick.y)
         stop = PawMark(timeline.end_frame, stop_x, stop_y)
+        raw_time = raw_crossing_time_seconds(start, stop, fps)
         return (
             TrialAnnotation(
-                video.relative_path,
-                video.dataset,
-                video.day,
-                video.group,
-                video.subject,
-                video.trial,
-                fps,
-                start.frame,
-                start.frame / fps,
-                start.x,
-                start.y,
-                stop.frame,
-                stop.frame / fps,
-                stop.x,
-                stop.y,
-                scored_crossing_time_seconds(outcome, raw_crossing_time_seconds(start, stop, fps)),
-                outcome,
-                distance,
-                max_time_applied(outcome),
-                now_stamp(),
+                relative_video=video.relative_path,
+                dataset=video.dataset,
+                day=video.day,
+                group=video.group,
+                subject=video.subject,
+                trial=video.trial,
+                fps=fps,
+                start_frame=start.frame,
+                start_time=start.frame / fps,
+                start_x=start.x,
+                start_y=start.y,
+                stop_frame=stop.frame,
+                stop_time=stop.frame / fps,
+                stop_x=stop.x,
+                stop_y=stop.y,
+                crossing_time=scored_crossing_time_seconds(outcome, raw_time),
+                outcome=outcome,
+                distance_cm=distance_cm,
+                max_time_applied=max_time_applied(outcome),
+                saved_at=now_stamp(),
             ),
             tracking,
-            cal,
+            calibration,
         )
-    def _save_auto_batch(self,videos):
-        saved=0; days=set()
-        for video in videos:
-            data=self._automatic_annotation(video)
-            if not data: continue
-            annotation,tracking,cal=data; self.annotation_store.save(annotation); self.results_workbook.save(annotation); self.tail_position_store.record_trial(video,tracking,cal,annotation.start_frame,annotation.stop_frame,refresh_plot=False); days.add((video.dataset,video.day)); saved+=1
-        for dataset,day in days:self.tail_position_store.refresh_day_plot(dataset,day)
-        self.saved_annotations=self.annotation_store.load_by_video(); return saved
 
-    def _analyze(self,videos,label):
-        if any(calibration_key(v) not in self.saved_tick_calibrations for v in videos): self.status_var.set("Detect and confirm ticks first."); return
-        _p,_s,track,_tick=self._runtime(); args=["analyze-files","--config",str(track)]+sum((["--video",str(v.path)] for v in videos),[])
-        self._run_dlc(args,lambda c,o:self._finish_analysis(videos,c,o),f"Analyzing {label}...")
+    def _run_dlc(
+        self,
+        args: list[str],
+        done: Callable[[int, str], None],
+        message: str,
+    ) -> None:
+        if self.dlc_running:
+            self.status_var.set("A DLC task is already running.")
+            return
 
-    def _finish_analysis(self,videos,code,output):
-        if code:self.status_var.set(output.splitlines()[-1] if output else "Tracking failed.");return
-        saved=self._save_auto_batch(videos)
-        if self.current_video in videos:self._load_tracking(self.current_video);self.show_frame(self.current_frame)
-        self.status_var.set(f"Analysis complete. {saved} result(s) saved to Excel; tail graph refreshed.")
+        python, runner, _tracking_config, _tick_config = self._runtime()
+        if not python.exists() or not runner.exists():
+            self.status_var.set("DeepLabCut environment is missing.")
+            return
 
-    def analyze_current_tracking(self):
-        if self.current_video:self._analyze([self.current_video],"current trial")
-    def analyze_selected_animal(self):
-        key=self.selected_subject_key(); videos=list(self.dataset.trials_for_subject(key).values()) if key else []; self._analyze(videos,"selected animal") if videos else None
-    def analyze_selected_day(self):
-        videos=[v for v in self.dataset.videos if v.day==self.day_var.get()]; self._analyze(videos,"selected day") if videos else None
-    # Final DLC UI overrides for the restored workflow.
-    def _build_detection_controls(self, sidebar: ttk.Frame) -> None:
-        box = ttk.LabelFrame(sidebar, text="DeepLabCut Tracking", padding=6)
-        box.grid(row=7, column=0, sticky="ew", pady=(0, 8))
-        box.columnconfigure(0, weight=1)
-        self.detection_enabled_var.set(True)
-        ttk.Checkbutton(
-            box,
-            text="Show live tracking (>= 0.20)",
-            variable=self.detection_enabled_var,
-            command=lambda: self.show_frame(self.current_frame),
-        ).grid(row=0, column=0, sticky="w")
-        ttk.Button(box, text="Analyze Current Trial", command=self.analyze_current_tracking).grid(
-            row=1, column=0, sticky="ew", pady=(5, 0)
-        )
-        ttk.Button(box, text="Analyze Selected Animal (T1-T3)", command=self.analyze_selected_animal).grid(
-            row=2, column=0, sticky="ew", pady=(4, 0)
-        )
-        ttk.Button(box, text="Analyze Selected Day", command=self.analyze_selected_day).grid(
-            row=3, column=0, sticky="ew", pady=(4, 0)
-        )
-    def _run_dlc(self, args, done, message):
-        if self.dlc_running: self.status_var.set("A DLC task is already running."); return
-        python, script, _track, _tick = self._runtime()
-        if not python.exists() or not script.exists(): self.status_var.set("DeepLabCut environment is missing."); return
-        self.dlc_running=True; self.status_var.set(message)
-        def work():
+        self.dlc_running = True
+        self.status_var.set(message)
+
+        def work() -> None:
             try:
-                p=subprocess.Popen([str(python),str(script),*args],cwd=ROOT,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1)
-                lines=[]
-                for line in p.stdout or ():
-                    lines.append(line)
-                    if line.startswith("RBT_PROGRESS\t"):
-                        parts=line.rstrip().split("\t",3)
-                        if len(parts)==4: self.after(0,lambda parts=parts:self.status_var.set(f"Analyzing video {parts[1]}/{parts[2]}: {Path(parts[3]).stem}"))
-                code=p.wait(); out="".join(lines)
-            except OSError as e: code,out=1,str(e)
-            self.after(0,lambda:(setattr(self,"dlc_running",False),done(code,out)))
-        threading.Thread(target=work,daemon=True).start()
+                process = subprocess.Popen(
+                    [str(python), str(runner), *args],
+                    cwd=ROOT,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                )
+                output_lines: list[str] = []
+                for line in process.stdout or ():
+                    output_lines.append(line)
+                    if line.startswith("RBT_PROGRESS	"):
+                        parts = line.rstrip().split("	", 3)
+                        if len(parts) == 4:
+                            self.after(
+                                0,
+                                lambda parts=parts: self.status_var.set(
+                                    f"Analyzing video {parts[1]}/{parts[2]}: "
+                                    f"{Path(parts[3]).stem}"
+                                ),
+                            )
+                code = process.wait()
+                output = "".join(output_lines)
+            except OSError as exc:
+                code, output = 1, str(exc)
 
-    def _calibrate_day_ticks(self, on_complete=None) -> bool:
+            def finish() -> None:
+                self.dlc_running = False
+                done(code, output)
+
+            self.after(0, finish)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _calibrate_day_ticks(
+        self,
+        on_complete: Callable[[int, int], None] | None = None,
+    ) -> bool:
         if self.dataset is None or not self.day_var.get():
             self.tick_status_var.set("Choose a video folder first.")
             return False
@@ -1354,20 +1218,25 @@ class RBTReviewApp(tk.Tk):
             if index >= len(t1_videos):
                 self.saved_tick_calibrations = self.tick_store.load_by_key()
                 self.tick_status_var.set(
-                    f"Tick Calibration Complete. {complete}/{len(t1_videos)} T1 calibration(s) confirmed."
+                    f"Tick Calibration Complete. {complete}/{len(t1_videos)} "
+                    "T1 calibration(s) confirmed."
                 )
                 if on_complete is not None:
                     on_complete(complete, len(t1_videos))
                 return
 
             video = t1_videos[index]
-            _python, _script, _track, tick_config = self._runtime()
+            _python, _runner, _tracking_config, tick_config = self._runtime()
 
             def finish(code: int, _output: str) -> None:
-                success = False
-                if not code:
-                    success = self._save_calibration(video, self.dlc_tick_detector.detect_for_video(video))
-                run(index + 1, complete + int(success))
+                succeeded = (
+                    not code
+                    and self._save_calibration(
+                        video,
+                        self.dlc_tick_detector.detect_for_video(video),
+                    )
+                )
+                run(index + 1, complete + int(succeeded))
 
             self._run_dlc(
                 [
@@ -1380,13 +1249,16 @@ class RBTReviewApp(tk.Tk):
                     "10",
                 ],
                 finish,
-                f"Detecting day ticks {index + 1}/{len(t1_videos)}: Cage {video.cage_number} Rat {video.rat_id}, T1...",
+                (
+                    f"Detecting day ticks {index + 1}/{len(t1_videos)}: "
+                    f"Cage {video.cage_number} Rat {video.rat_id}, T1..."
+                ),
             )
 
         run()
         return True
 
-    def auto_detect_day_ticks(self):
+    def auto_detect_day_ticks(self) -> None:
         self._calibrate_day_ticks()
 
     def calibrate_and_analyze_day(self) -> None:
@@ -1403,47 +1275,66 @@ class RBTReviewApp(tk.Tk):
         def begin_analysis(complete: int, total: int) -> None:
             if complete != total:
                 self.status_var.set(
-                    f"Day calibration incomplete ({complete}/{total}). Day analysis was not started."
+                    f"Day calibration incomplete ({complete}/{total}). "
+                    "Day analysis was not started."
                 )
                 return
             self.status_var.set("Day ticks confirmed. Starting day analysis...")
-            self._analyze(day_videos, f"{day} batch", True)
+            self._analyze(day_videos, f"{day} batch", refresh_tail=True)
 
         self.status_var.set(f"Calibrating {day} ticks before day analysis...")
         self._calibrate_day_ticks(begin_analysis)
-    def show_frame(self, frame_number: int) -> None:
-        if self.cap is None: return
-        frame_number=max(0,min(frame_number,max(self.frame_count-1,0))); self.cap.set(cv2.CAP_PROP_POS_FRAMES,frame_number); ok,frame=self.cap.read()
-        if not ok: self.pause(); return
-        self.current_frame=frame_number; prediction=self.current_tracking.points_for_frame(frame_number) if self.current_tracking else None
-        display=draw_tracking_overlay(frame,prediction) if self.detection_enabled_var.get() else frame
-        if self.detection_enabled_var.get(): self.detection_status_var.set("DLC tracking loaded" if prediction else "No DLC point for this frame")
-        rgb=cv2.cvtColor(display,cv2.COLOR_BGR2RGB); self.photo=ImageTk.PhotoImage(image=Image.fromarray(rgb)); self.canvas.delete("all"); self.canvas.create_image(0,0,anchor="nw",image=self.photo)
-        self.draw_tick_overlays(); self.draw_mark_overlays(); self.updating_slider=True; self.slider.set(frame_number); self.updating_slider=False; self.frame_var.set(f"Frame {frame_number+1}/{max(self.frame_count,1)}"); self.time_var.set(f"{self.frame_time(frame_number):.2f} sec")
-    def _load_tracking(self, video):
-        path=self.tracking_store.find_for_video(video)
-        if not path:
-            self.current_tracking=None; self.current_scoring_tracking=None; self.tracking_video_path=video.path; return False
-        try:
-            self.current_tracking=self.tracking_store.load(path)
-            self.current_scoring_tracking=self.current_tracking.filtered(SCORING_LIKELIHOOD_CUTOFF)
-            self.tracking_video_path=video.path
-            return True
-        except (OSError, ValueError):
-            self.current_tracking=None; self.current_scoring_tracking=None; self.tracking_video_path=video.path; return False
 
-    def _apply_automatic_current_result(self):
-        if self.current_video is None: return
-        data=self._automatic_annotation(self.current_video)
-        if not data: return
-        annotation, _tracking, _cal = data
-        self.marks={"start":PawMark(annotation.start_frame,annotation.start_x,annotation.start_y),"stop":PawMark(annotation.stop_frame,annotation.stop_x,annotation.stop_y)}
-        self.outcome_var.set(annotation.outcome); self.set_distance_cm(annotation.distance_cm); self.update_distance_controls(); self.update_mark_labels(); self.update_result_labels()
+    def _load_tracking(self, video: TrialVideo) -> bool:
+        csv_path = self.tracking_store.find_for_video(video)
+        self.tracking_video_path = video.path
+        if csv_path is None:
+            self.current_tracking = None
+            self.current_scoring_tracking = None
+            return False
+
+        try:
+            self.current_tracking = self.tracking_store.load(csv_path)
+            self.current_scoring_tracking = self.current_tracking.filtered(
+                SCORING_LIKELIHOOD_CUTOFF
+            )
+        except (OSError, ValueError):
+            self.current_tracking = None
+            self.current_scoring_tracking = None
+            return False
+        return True
+
+    def _apply_automatic_current_result(self) -> None:
+        if self.current_video is None:
+            return
+
+        result = self._automatic_annotation(self.current_video)
+        if result is None:
+            return
+
+        annotation, _tracking, _calibration = result
+        self.marks = {
+            "start": PawMark(
+                annotation.start_frame,
+                annotation.start_x,
+                annotation.start_y,
+            ),
+            "stop": PawMark(
+                annotation.stop_frame,
+                annotation.stop_x,
+                annotation.stop_y,
+            ),
+        }
+        self.outcome_var.set(annotation.outcome)
+        self.set_distance_cm(annotation.distance_cm)
+        self.update_distance_controls()
+        self.update_result_labels()
 
     def draw_mark_overlays(self) -> None:
         for kind, mark in self.marks.items():
             if mark.frame > self.current_frame:
                 continue
+
             is_fall = kind == "stop" and self.outcome_var.get() == OUTCOME_FELL
             x, y = mark.x, mark.y
             if is_fall and self.current_scoring_tracking is not None:
@@ -1454,7 +1345,9 @@ class RBTReviewApp(tk.Tk):
 
             display_x, display_y = self._canvas_point(x, y)
             color = "#ff4d4d" if is_fall else "#36e07a"
-            label = "fall" if is_fall else ("0 cm start" if kind == "start" else "120 cm end")
+            label = "fall" if is_fall else (
+                "0 cm start" if kind == "start" else "120 cm end"
+            )
             radius = max(8, 10 * self.display_scale)
             line_width = max(1, int(round(3 * self.display_scale)))
             self.canvas.create_oval(
@@ -1472,11 +1365,16 @@ class RBTReviewApp(tk.Tk):
                 fill=color,
                 anchor="w",
             )
+
     def show_frame(self, frame_number: int) -> None:
         if self.cap is None:
             return
-        if self.current_video is not None and self.tracking_video_path != self.current_video.path:
+        if (
+            self.current_video is not None
+            and self.tracking_video_path != self.current_video.path
+        ):
             self._load_tracking(self.current_video)
+
         frame_number = max(0, min(frame_number, max(self.frame_count - 1, 0)))
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
         ok, frame = self.cap.read()
@@ -1485,74 +1383,179 @@ class RBTReviewApp(tk.Tk):
             return
 
         self.current_frame = frame_number
-        prediction = self.current_tracking.points_for_frame(frame_number) if self.current_tracking else None
-        display = draw_tracking_overlay(frame, prediction) if self.detection_enabled_var.get() else frame
-        if self.detection_enabled_var.get():
-            self.detection_status_var.set("DLC model tracking" if prediction else "No DLC CSV for this frame")
+        prediction = (
+            self.current_tracking.points_for_frame(frame_number)
+            if self.current_tracking is not None
+            else None
+        )
+        display = (
+            draw_tracking_overlay(frame, prediction)
+            if self.detection_enabled_var.get()
+            else frame
+        )
         rgb = cv2.cvtColor(display, cv2.COLOR_BGR2RGB)
         self.photo = ImageTk.PhotoImage(image=self._canvas_image(rgb))
         self.canvas.delete("all")
         self.canvas.create_image(0, 0, anchor="nw", image=self.photo)
         self.draw_tick_overlays()
         self.draw_mark_overlays()
+
         self.updating_slider = True
         self.slider.set(frame_number)
         self.updating_slider = False
-        self.frame_var.set(f"Frame {frame_number + 1}/{max(self.frame_count, 1)}")
+        self.frame_var.set(
+            f"Frame {frame_number + 1}/{max(self.frame_count, 1)}"
+        )
         self.time_var.set(f"{self.frame_time(frame_number):.2f} sec")
-    def _finish_analysis(self,videos,code,output):
-        if code:self.status_var.set(output.splitlines()[-1] if output else "Tracking failed.");return
-        saved=self._save_auto_batch(videos)
-        if self.current_video in videos:
-            self._load_tracking(self.current_video); self._apply_automatic_current_result(); self.show_frame(self.current_frame)
-        self.status_var.set(f"Analysis complete. {saved} result(s) saved to Excel; tail graph refreshed.")
-    def _save_auto_batch(self, videos, refresh_tail=False):
-        saved=0; tail_days=set(); errors=[]
+
+    def _save_auto_batch(
+        self,
+        videos: list[TrialVideo],
+        refresh_tail: bool = False,
+    ) -> tuple[int, int, bool]:
+        records: list[tuple[TrialVideo, TrialAnnotation, DLCTracking, BeamCalibration]] = []
+        skipped = 0
+        self.last_batch_save_error = ""
+
         for video in videos:
-            data=self._automatic_annotation(video)
-            if not data: errors.append(video.path.name); continue
-            annotation,tracking,cal=data
-            try:
-                self.annotation_store.save(annotation); self.results_workbook.save(annotation)
-                if self.tail_position_store.record_trial(video,tracking,cal,annotation.start_frame,annotation.stop_frame,refresh_plot=False): tail_days.add((video.dataset,video.day))
-                saved+=1
-            except ResultsWorkbookError: errors.append(video.path.name)
-        graph_ok=True
-        if refresh_tail:
-            graph_ok=all(self.tail_position_store.refresh_day_plot(dataset,day) is not None for dataset,day in tail_days)
-        self.saved_annotations=self.annotation_store.load_by_video(); return saved, len(errors), graph_ok
+            result = self._automatic_annotation(video)
+            if result is None:
+                skipped += 1
+                continue
+            annotation, tracking, calibration = result
+            records.append((video, annotation, tracking, calibration))
 
-    def _analyze(self,videos,label,refresh_tail=False):
-        if any(calibration_key(v) not in self.saved_tick_calibrations for v in videos): self.status_var.set("Detect and confirm ticks first."); return
-        _p,_s,track,_tick=self._runtime(); args=["analyze-files","--config",str(track)]+sum((["--video",str(v.path)] for v in videos),[])
-        self._run_dlc(args,lambda c,o:self._finish_analysis(videos,c,o,refresh_tail),f"Analyzing {label}...")
+        if not records:
+            self.saved_annotations = self.annotation_store.load_by_video()
+            return 0, skipped, not refresh_tail
 
-    def _finish_analysis(self,videos,code,output,refresh_tail=False):
-        if code:self.status_var.set(output.splitlines()[-1] if output else "Tracking failed.");return
-        saved,skipped,graph_ok=self._save_auto_batch(videos,refresh_tail)
+        annotations = [annotation for _video, annotation, _tracking, _calibration in records]
+        try:
+            self.annotation_store.save_many(annotations)
+            self.results_workbook.save_many(annotations)
+        except (OSError, ResultsWorkbookError) as exc:
+            self.last_batch_save_error = str(exc)
+            self.saved_annotations = self.annotation_store.load_by_video()
+            return 0, skipped + len(records), False
+
+        try:
+            plots = self.tail_position_store.record_trials(
+                [
+                    (
+                        video,
+                        tracking,
+                        calibration,
+                        annotation.start_frame,
+                        annotation.stop_frame,
+                    )
+                    for video, annotation, tracking, calibration in records
+                ],
+                refresh_plots=refresh_tail,
+            )
+            graph_ok = (
+                not refresh_tail
+                or bool(plots) and all(path is not None for path in plots.values())
+            )
+        except OSError as exc:
+            self.last_batch_save_error = f"Results saved, but tail graph could not be written: {exc}"
+            graph_ok = False
+
+        self.saved_annotations = self.annotation_store.load_by_video()
+        return len(records), skipped, graph_ok
+
+    def _analyze(
+        self,
+        videos: list[TrialVideo],
+        label: str,
+        refresh_tail: bool = False,
+    ) -> None:
+        if not videos:
+            self.status_var.set("No videos are available for analysis.")
+            return
+        if any(self.calibration_for_video(video) is None for video in videos):
+            self.status_var.set("Detect and confirm ticks first.")
+            return
+
+        _python, _runner, tracking_config, _tick_config = self._runtime()
+        args = ["analyze-files", "--config", str(tracking_config)]
+        for video in videos:
+            args.extend(("--video", str(video.path)))
+
+        self._run_dlc(
+            args,
+            lambda code, output: self._finish_analysis(
+                videos,
+                code,
+                output,
+                refresh_tail,
+            ),
+            f"Analyzing {label}...",
+        )
+
+    def _finish_analysis(
+        self,
+        videos: list[TrialVideo],
+        code: int,
+        output: str,
+        refresh_tail: bool,
+    ) -> None:
+        if code:
+            self.status_var.set(
+                output.splitlines()[-1] if output else "Tracking failed."
+            )
+            return
+
+        saved, skipped, graph_ok = self._save_auto_batch(videos, refresh_tail)
         if self.current_video in videos:
-            self._load_tracking(self.current_video); self._apply_automatic_current_result(); self.show_frame(self.current_frame)
-        extra=(" Tail graph refreshed." if refresh_tail and graph_ok else (" Tail graph needs review." if refresh_tail else ""))
-        self.status_var.set(f"Analysis complete. {saved} result(s) saved to Excel; {skipped} need review."+extra)
+            self._load_tracking(self.current_video)
+            self._apply_automatic_current_result()
+            self.show_frame(self.current_frame)
 
-    def analyze_current_tracking(self):
-        if self.current_video:self._analyze([self.current_video],"current trial")
-    def analyze_selected_animal(self):
+        graph_message = ""
+        if refresh_tail:
+            graph_message = (
+                " Tail graph refreshed."
+                if graph_ok
+                else " Tail graph needs review."
+            )
+        error_message = (
+            f" {self.last_batch_save_error}"
+            if skipped and self.last_batch_save_error
+            else ""
+        )
+        self.status_var.set(
+            f"Analysis complete. {saved} result(s) saved to Excel; "
+            f"{skipped} need review.{error_message}{graph_message}"
+        )
+
+    def analyze_current_tracking(self) -> None:
+        if self.current_video is None:
+            self.status_var.set("Load a trial before analyzing.")
+            return
+        self._analyze([self.current_video], "current trial", refresh_tail=True)
+
+    def analyze_selected_animal(self) -> None:
         if self.dataset is None:
             self.status_var.set("Choose a video folder first.")
             return
-        key = self.selected_subject_key()
-        videos = list(self.dataset.trials_for_subject(key).values()) if key else []
-        if videos:
-            self._analyze(videos, "selected animal")
 
-    def analyze_selected_day(self):
+        subject_key = self.selected_subject_key()
+        videos = (
+            list(self.dataset.trials_for_subject(subject_key).values())
+            if subject_key
+            else []
+        )
+        self._analyze(videos, "selected animal", refresh_tail=True)
+
+    def analyze_selected_day(self) -> None:
         if self.dataset is None or not self.day_var.get():
             self.status_var.set("Choose a video folder first.")
             return
-        videos = [video for video in self.dataset.videos if video.day == self.day_var.get()]
-        if videos:
-            self._analyze(videos, "selected day", True)
+
+        videos = [
+            video for video in self.dataset.videos if video.day == self.day_var.get()
+        ]
+        self._analyze(videos, "selected day", refresh_tail=True)
 def check_app() -> int:
     dataset = DatasetIndex()
     print(f"Dataset: {dataset.dataset_dir.relative_to(ROOT)}")
@@ -1565,101 +1568,18 @@ def check_app() -> int:
     return 0
 
 
-def check_detection() -> int:
-    dataset = DatasetIndex()
-    detector = MouseLimbDetector()
-    videos = [video for video in dataset.videos if video.day == "D30"]
-    if not videos:
-        print("No D30 survivor videos found for detection check.")
-        return 1
-
-    total_frames = 0
-    found_frames = 0
-    print("Detection smoke check on sampled D30 survivor frames:")
-    for video in videos:
-        cap = cv2.VideoCapture(str(video.path))
-        if not cap.isOpened():
-            print(f"  {video.relative_path}: could not open")
-            continue
-
-        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
-        if frame_count <= 0:
-            print(f"  {video.relative_path}: no frames")
-            cap.release()
-            continue
-
-        frame_numbers = sorted(
-            {
-                max(0, min(frame_count - 1, int(frame_count * fraction)))
-                for fraction in (0.25, 0.50, 0.75)
-            }
-        )
-        video_found = 0
-        for frame_number in frame_numbers:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
-            ok, frame = cap.read()
-            if not ok:
-                continue
-            total_frames += 1
-            detection = detector.detect(frame)
-            if detection.found:
-                found_frames += 1
-                video_found += 1
-
-        cap.release()
-        print(f"  {video.relative_path}: mouse found on {video_found}/{len(frame_numbers)} sampled frames")
-
-    print(f"Detected mouse on {found_frames}/{total_frames} sampled frames.")
-    return 0 if found_frames else 1
 
 
-def check_ticks() -> int:
-    dataset = DatasetIndex()
-    detector = BeamTickDetector()
-    videos = [video for video in dataset.videos if video.trial == 1]
-    if not videos:
-        print("No T1 survivor videos found for tick check.")
-        return 1
-
-    found = 0
-    print("Tick calibration smoke check on T1 survivor videos:")
-    for video in videos:
-        detection = detector.detect_from_video(video.path)
-        if detection.ticks:
-            found += 1
-            first_tick = detection.ticks[0]
-            last_tick = detection.ticks[-1]
-            print(
-                f"  {video.relative_path}: {detection.message}; "
-                f"0cm=({first_tick.x},{first_tick.y}) 120cm=({last_tick.x},{last_tick.y})"
-            )
-        else:
-            print(f"  {video.relative_path}: {detection.message}")
-
-    print(f"Tick sequence produced for {found}/{len(videos)} videos.")
-    return 0 if found else 1
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="RBT-CV video review GUI")
-    parser.add_argument("--check", action="store_true", help="load the dataset without opening the GUI")
     parser.add_argument(
-        "--check-detection",
+        "--check",
         action="store_true",
-        help="sample D30 frames and run the mouse/limb detector without opening the GUI",
-    )
-    parser.add_argument(
-        "--check-ticks",
-        action="store_true",
-        help="run beam tick draft detection on T1 survivor videos without opening the GUI",
+        help="load the current dataset without opening the GUI",
     )
     args = parser.parse_args(argv)
-
-    if args.check_ticks:
-        return check_ticks()
-
-    if args.check_detection:
-        return check_detection()
 
     if args.check:
         return check_app()

@@ -42,17 +42,20 @@ class TickDetectionResult:
     message: str
 
 
-def calibration_key(video: TrialVideo) -> str:
-    return f"{video.dataset}|{video.day}|{video.cage_number}_{video.rat_id}"
+def calibration_key(video: TrialVideo, trial_specific: bool = False) -> str:
+    """Return the shared T1 key or a T2/T3 recalibration key for one trial."""
+    key = f"{video.dataset}|{video.day}|{video.cage_number}_{video.rat_id}"
+    return f"{key}|T{video.trial}" if trial_specific else key
 
 
 def calibration_from_detection(
     video: TrialVideo,
     detection: TickDetectionResult,
     confirmed_at: str,
+    trial_specific: bool = False,
 ) -> BeamCalibration:
     return BeamCalibration(
-        key=calibration_key(video),
+        key=calibration_key(video, trial_specific=trial_specific),
         dataset=video.dataset,
         day=video.day,
         cage=video.cage_number,
@@ -449,20 +452,3 @@ class DLCTickDetector:
             for distance_cm, indexes in columns.items()
             if {"x", "y", "likelihood"}.issubset(indexes)
         }
-
-class BeamTickDetector:
-    """Legacy GUI compatibility wrapper.
-
-    Automatic tick calibration is now performed by ``DLCTickDetector`` after the
-    trained DLC tick model writes a CSV. The older frame-only detector deliberately
-    returns a clear message instead of inventing unsafe calibration points.
-    """
-
-    def detect_from_video(self, video_path: Path) -> TickDetectionResult:
-        if not video_path.exists():
-            return TickDetectionResult((), (), "Video file was not found.")
-        return TickDetectionResult(
-            (),
-            (),
-            "Run Detect Trial's Ticks with the trained DLC tick model before confirming intervals.",
-        )
