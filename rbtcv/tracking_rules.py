@@ -38,6 +38,7 @@ class TrackingFrameState:
     end_frame: int | None
     farthest_distance_cm: int
     back_paw_x: float | None
+    back_paw_y: float | None
     body_center_x: float | None
     body_center_y: float | None
 
@@ -52,6 +53,7 @@ class TrackingTimeline:
     end_frame: int | None
     final_state: str
     farthest_distance_cm: int
+    ended_at_video_end: bool = False
 
     def state_at(self, frame_number: int) -> TrackingFrameState | None:
         """Return the latest known state at or before a video frame.
@@ -68,10 +70,14 @@ class TrackingTimeline:
 def analyze_tracking_timeline(tracking: DLCTracking, calibration: BeamCalibration) -> TrackingTimeline:
     """Analyze one high-confidence DLC timeline against confirmed beam ticks.
 
-    The visible *back* paw must cross tick 0 in the direction of tick 120 before
-    timing begins. After that start, a body center below the local tick-center line
-    is a fall and takes precedence over a same-frame endpoint crossing. Otherwise,
-    the visible back paw crossing tick 120 ends a successful trial.
+    The visible *back* paw must reach or pass tick 0 in the direction of tick 120
+    before timing begins. This intentionally includes the first reliable frame
+    after an uncaptured or low-confidence crossing. After that start, a body center
+    below the local tick-center line is a fall and takes precedence over a
+    same-frame endpoint crossing. Otherwise, the visible back paw crossing tick
+    120 ends a successful trial. If the trial reaches the final prediction frame
+    after a valid start without either terminal event, the video end itself is
+    treated as the completion time.
     """
     start_tick, end_tick = _required_endpoint_ticks(calibration)
     direction = _beam_direction(start_tick, end_tick)
@@ -85,6 +91,7 @@ def analyze_tracking_timeline(tracking: DLCTracking, calibration: BeamCalibratio
     farthest_distance_cm = 0
     previous_back_paw: DLCPoint | None = None
     endpoint_frames = 0
+    ended_at_video_end = False
 
     for frame_number in frame_numbers:
         prediction = tracking.frames[frame_number]
@@ -138,12 +145,23 @@ def analyze_tracking_timeline(tracking: DLCTracking, calibration: BeamCalibratio
                 end_frame = frame_number
                 farthest_distance_cm = BEAM_LENGTH_CM
 
+        # Some recordings end before a completed beam traversal is visible. Once
+        # the 0 cm start has been established, use the final video/tracking frame
+        # as the requested completion time when no fall or 120 cm crossing was
+        # observed. DLC emits one row for every video frame, so this is the video
+        # end rather than an arbitrary missing-prediction gap.
+        if state == RUNNING and frame_number == frame_numbers[-1]:
+            state = REACHED
+            end_frame = frame_number
+            ended_at_video_end = True
+
         states[frame_number] = TrackingFrameState(
             state=state,
             start_frame=start_frame,
             end_frame=end_frame,
             farthest_distance_cm=farthest_distance_cm,
             back_paw_x=back_paw.x if back_paw is not None else None,
+            back_paw_y=back_paw.y if back_paw is not None else None,
             body_center_x=body_center.x if body_center is not None else None,
             body_center_y=body_center.y if body_center is not None else None,
         )
@@ -159,6 +177,7 @@ def analyze_tracking_timeline(tracking: DLCTracking, calibration: BeamCalibratio
         end_frame=end_frame,
         final_state=state,
         farthest_distance_cm=farthest_distance_cm,
+        ended_at_video_end=ended_at_video_end,
     )
 
 

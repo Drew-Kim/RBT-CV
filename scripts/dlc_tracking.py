@@ -166,7 +166,7 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--shuffle", type=int, default=1)
     analyze.set_defaults(handler=analyze_exact_videos)
 
-    ticks = commands.add_parser("tick-analyze", help="analyze 10 distributed tick-calibration frames")
+    ticks = commands.add_parser("tick-analyze", help="analyze distributed tick-calibration frames")
     ticks.add_argument("--config", type=Path, required=True)
     ticks.add_argument("--video", type=Path, required=True)
     ticks.add_argument("--output-dir", type=Path, default=DEFAULT_TICK_PREDICTIONS_DIR)
@@ -175,7 +175,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--early-frames",
         type=int,
         default=10,
-        help="number of candidate frames sampled across the full video",
+        help="number of candidate frames distributed across the full video",
     )
     ticks.set_defaults(handler=analyze_tick_video)
     return parser

@@ -1,6 +1,6 @@
 # RBT-CV
 
-RBT-CV is a ETL workflow for rotating beam trials under Dr.Vahdat's StrokeNeuroRecovery Lab. This program makes video analysis easier using DeepLabCut models for beam calibrations, automatic timing, fall detection inputing the results into an Excel results, and plotting a tail position graph.
+RBT-CV is an ETL and analysis workflow for rotating beam trials under Dr.Vahdat's StrokeNeuroRecovery Lab. This program makes video analysis easier using DeepLabCut models for beam calibrations, automatic timing, fall detection inputing the results into an Excel results, and plotting a tail position graph.
 
 The GUI uses 2 models, one for tracking four points on each mouse, the front paw, back paw, tail end, and body center. The back paw controls the start and finish of a trial. The body center is used for fall detection and fall-distance scoring. The tail end is used for creating the tail position graph for patterns. The second model is used for tickmark detection across each trial used during fall instances to record the maximum distance traveled by the mouse.
 
@@ -10,7 +10,7 @@ The GUI uses 2 models, one for tracking four points on each mouse, the front paw
 
 ## Features
 
-- DeepLabCut models for the front paw, back paw, tail, and body center and tickmark detection
+- DeepLabCut models for the front paw, back paw, tail end, tail middle, tail start, and body center and tickmark detection
 - Automatic 0 cm start and 120 cm finish timing
 - Fall detection with a 15px margin to avoid counting a brief hanging as a fall in order to account for recovery
 - Tick calibration and the analysis can be run per trial, per animal, or per day

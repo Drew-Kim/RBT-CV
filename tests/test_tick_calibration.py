@@ -62,6 +62,26 @@ class TickCalibrationTests(unittest.TestCase):
         self.assertEqual(result.ticks[7].x, 240)
         self.assertIn("2 clear non-overlapping", result.message)
 
+    def test_detector_keeps_only_non_overlapping_ticks_as_a_draft(self) -> None:
+        rows = csv_rows()
+        tick_60_x_column = 1 + (BEAM_TICK_MARKS_CM.index(60) * 3)
+        tick_70_x_column = 1 + (BEAM_TICK_MARKS_CM.index(70) * 3)
+        for row in rows[3:]:
+            row[tick_70_x_column] = row[tick_60_x_column]
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "overlapping_ticks.csv"
+            with path.open("w", newline="", encoding="utf-8") as handle:
+                csv.writer(handle).writerows(rows)
+
+            result = DLCTickDetector().detect_from_csv(path)
+
+        distances = {tick.distance_cm for tick in result.ticks}
+        self.assertEqual(len(result.ticks), len(BEAM_TICK_MARKS_CM) - 2)
+        self.assertNotIn(60, distances)
+        self.assertNotIn(70, distances)
+        self.assertIn("unconfirmed draft", result.message)
+
     def test_t2_and_t3_can_use_trial_specific_calibrations(self) -> None:
         self.assertEqual(
             calibration_key(video(1)),

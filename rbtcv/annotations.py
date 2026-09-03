@@ -34,6 +34,9 @@ class TrialAnnotation:
     distance_cm: int
     max_time_applied: str
     saved_at: str
+    # Retains whether an automatic completion came from a detected 120 cm tick
+    # or from the trial video ending before that tick was observed.
+    terminal_event: str = "manual"
 
 
 class AnnotationStore:

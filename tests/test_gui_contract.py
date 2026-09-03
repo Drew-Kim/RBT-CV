@@ -19,6 +19,7 @@ class GUIContractTests(unittest.TestCase):
             "analyze_selected_animal",
             "analyze_selected_day",
             "save_annotation",
+            "save_all_trials",
             "show_frame",
             "draw_mark_overlays",
         }

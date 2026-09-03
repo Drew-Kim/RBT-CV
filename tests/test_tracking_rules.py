@@ -72,6 +72,27 @@ class DLCPredictionStoreTests(unittest.TestCase):
         self.assertEqual(scoring_frame.tail_count, 1)
         self.assertEqual(len(scoring_frame.body_points), 1)
 
+    def test_parser_recognizes_six_landmark_model_tail_points(self) -> None:
+        bodyparts = ["back_paw", "front_paw", "tail_S", "tail_M", "tail_E", "body_center"]
+        rows = [
+            ["scorer", *("DLC" for _ in range(18))],
+            ["bodyparts", *(part for part in bodyparts for _ in range(3))],
+            ["coords", *(coord for _ in bodyparts for coord in ("x", "y", "likelihood"))],
+            ["0", *(value for index in range(6) for value in (str(index * 10), str(index * 10 + 1), "0.99"))],
+        ]
+        with tempfile.TemporaryDirectory() as folder:
+            csv_path = Path(folder) / "six_point_dlc.csv"
+            with csv_path.open("w", newline="", encoding="utf-8") as handle:
+                csv.writer(handle).writerows(rows)
+            frame = DLCPredictionStore().load(csv_path).points_for_frame(0)
+
+        self.assertIsNotNone(frame)
+        self.assertEqual(frame.paw_count, 2)
+        self.assertEqual(frame.tail_count, 3)
+        self.assertIsNotNone(frame.tail_start)
+        self.assertIsNotNone(frame.tail_middle)
+        self.assertIsNotNone(frame.tail_end)
+
 
 class TrackingRulesTests(unittest.TestCase):
     def tracking(self, frames: dict[int, DLCFramePrediction]) -> DLCTracking:
@@ -95,6 +116,25 @@ class TrackingRulesTests(unittest.TestCase):
         self.assertEqual(timeline.end_frame, 3)
         self.assertEqual(timeline.farthest_distance_cm, 120)
 
+    def test_first_reliable_back_paw_already_past_zero_starts_timing(self) -> None:
+        """A missed exact crossing cannot leave a trial permanently waiting."""
+        timeline = analyze_tracking_timeline(
+            self.tracking(
+                {
+                    # The first reliable back-paw observation is already beyond
+                    # the 0 cm tick, as happens after an occluded crossing.
+                    0: prediction(0, 108.0, 40.0),
+                    1: prediction(1, 200.0, 40.0),
+                    2: prediction(2, 300.0, 40.0),
+                }
+            ),
+            calibration(),
+        )
+
+        self.assertEqual(timeline.start_frame, 0)
+        self.assertEqual(timeline.end_frame, 2)
+        self.assertEqual(timeline.final_state, REACHED)
+
     def test_stable_near_endpoint_finishes_a_trial(self) -> None:
         timeline = analyze_tracking_timeline(
             self.tracking(
@@ -110,6 +150,25 @@ class TrackingRulesTests(unittest.TestCase):
 
         self.assertEqual(timeline.final_state, REACHED)
         self.assertEqual(timeline.end_frame, 3)
+        self.assertFalse(timeline.ended_at_video_end)
+
+    def test_running_trial_uses_final_video_frame_as_completion(self) -> None:
+        timeline = analyze_tracking_timeline(
+            self.tracking(
+                {
+                    0: prediction(0, 90.0, 40.0),
+                    1: prediction(1, 100.0, 40.0),
+                    2: prediction(2, 180.0, 40.0),
+                }
+            ),
+            calibration(),
+        )
+
+        self.assertEqual(timeline.start_frame, 1)
+        self.assertEqual(timeline.end_frame, 2)
+        self.assertEqual(timeline.final_state, REACHED)
+        self.assertTrue(timeline.ended_at_video_end)
+        self.assertEqual(timeline.farthest_distance_cm, 30)
 
     def test_fall_records_distance_and_the_penalty_time(self) -> None:
         timeline = analyze_tracking_timeline(

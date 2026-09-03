@@ -9,10 +9,6 @@ ROOT = Path(__file__).resolve().parents[1]
 DATA_ROOT = ROOT / "data"
 PREFERRED_DATASETS = ("RBT DATA_B", "SEONG RBT DATA", "RBT DATA")
 
-# SEONG videos are useful fall examples, so keep them all visible in the GUI.
-# Other datasets still use the D30 survivor roster rule.
-FALL_EXAMPLE_DATASETS = {"SEONG RBT DATA"}
-
 VIDEO_RE = re.compile(
     r"^(?P<group>[A-Za-z]\d+)_(?P<subject>\d+)_T(?P<trial>\d+)_"
     r"(?P<date>\d{4}-\d{2}-\d{2})-(?P<clock>\d{6})-\d+\.avi$",
@@ -142,7 +138,8 @@ class DatasetIndex:
 
         self.all_videos = self._load_all_videos()
         self.survivor_keys = self._find_d30_survivors(self.all_videos)
-        self.videos = self._filter_survivor_videos(self.all_videos)
+        self.evaluated_subject_keys = self._find_baseline_and_d30_subjects(self.all_videos)
+        self.videos = self._filter_evaluated_videos(self.all_videos)
 
     @property
     def dataset_dir(self) -> Path:
@@ -189,27 +186,28 @@ class DatasetIndex:
                 survivors.add(video.survivor_key)
         return survivors
 
-    def _filter_survivor_videos(self, videos: list[TrialVideo]) -> list[TrialVideo]:
-        datasets_with_survivors = {dataset for dataset, _cage, _rat_id in self.survivor_keys}
-
-        survivor_videos: list[TrialVideo] = []
+    @staticmethod
+    def _find_baseline_and_d30_subjects(videos: list[TrialVideo]) -> set[tuple[str, str, str]]:
+        """Return only subjects represented in both BL and D30 folders."""
+        days_by_subject: dict[tuple[str, str, str], set[str]] = {}
         for video in videos:
-            # SEONG is intentionally kept broad because it contains fall examples
-            # for testing the 60-second rule and fall-distance scoring.
-            if video.dataset in FALL_EXAMPLE_DATASETS:
-                survivor_videos.append(video)
-                continue
+            days_by_subject.setdefault(video.survivor_key, set()).add(video.day.upper())
+        return {
+            subject_key
+            for subject_key, days in days_by_subject.items()
+            if {"BL", D30_DAY}.issubset(days)
+        }
 
-            # If a dataset has no D30 folder, show all videos so the app can still run.
-            if video.dataset not in datasets_with_survivors:
-                survivor_videos.append(video)
-                continue
-
-            # Keep earlier-day videos only for animals that made it to D30.
-            if video.survivor_key in self.survivor_keys:
-                survivor_videos.append(video)
-
-        return sorted(survivor_videos, key=lambda item: item.sort_key)
+    def _filter_evaluated_videos(self, videos: list[TrialVideo]) -> list[TrialVideo]:
+        """Keep trials only for animals eligible for the longitudinal analysis."""
+        return sorted(
+            (
+                video
+                for video in videos
+                if video.survivor_key in self.evaluated_subject_keys
+            ),
+            key=lambda item: item.sort_key,
+        )
 
     @property
 

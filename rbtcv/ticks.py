@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 import csv
 import json
+import math
 
 import numpy as np
 
@@ -12,6 +13,7 @@ from .scoring import BEAM_LENGTH_CM, BEAM_TICK_MARKS_CM, FALL_DISTANCE_STEP_CM
 
 
 TICK_CALIBRATIONS_FILE = ROOT / "outputs" / "tick_calibrations.csv"
+TICK_CALIBRATION_DRAFTS_FILE = ROOT / "outputs" / "tick_calibration_drafts.csv"
 
 
 @dataclass(frozen=True)
@@ -33,6 +35,20 @@ class BeamCalibration:
     frame_numbers: tuple[int, ...]
     ticks: tuple[BeamTick, ...]
     confirmed_at: str
+
+
+@dataclass(frozen=True)
+class LocalBeamSegment:
+    """One usable, calibrated beam segment close to an image point."""
+
+    start: BeamTick
+    end: BeamTick
+    fraction: float
+    distance_cm: float
+    tangent_x: float
+    tangent_y: float
+    upper_normal_x: float
+    upper_normal_y: float
 
 
 @dataclass(frozen=True)
@@ -115,6 +131,68 @@ def estimate_distance_from_point(calibration: BeamCalibration, x: int, y: int) -
     # Fall distances are scored to the nearest 5 cm.
     rounded = int(round(best_distance_cm / FALL_DISTANCE_STEP_CM) * FALL_DISTANCE_STEP_CM)
     return max(0, min(BEAM_LENGTH_CM, rounded))
+
+
+def local_beam_segment_for_point(
+    calibration: BeamCalibration,
+    x: float,
+    y: float,
+) -> LocalBeamSegment | None:
+    """Return the nearest usable calibrated segment and its local geometry.
+
+    Segments follow calibrated distance order, so the tangent always points in the
+    0 -> 120 cm direction even when the video is mirrored. The returned normal is
+    the perpendicular direction toward the top of the video (decreasing image y).
+    """
+    ticks = sorted(calibration.ticks, key=lambda tick: tick.distance_cm)
+    if len(ticks) < 2:
+        return None
+
+    best: tuple[BeamTick, BeamTick, float, float] | None = None
+    best_error = float("inf")
+    for start, end in zip(ticks, ticks[1:]):
+        distance_span = end.distance_cm - start.distance_cm
+        delta_x = float(end.x - start.x)
+        delta_y = float(end.y - start.y)
+        length_squared = (delta_x * delta_x) + (delta_y * delta_y)
+        if distance_span <= 0 or length_squared <= 0:
+            continue
+
+        raw_fraction = ((float(x) - start.x) * delta_x + (float(y) - start.y) * delta_y) / length_squared
+        nearest_fraction = max(0.0, min(1.0, raw_fraction))
+        projected_x = start.x + (nearest_fraction * delta_x)
+        projected_y = start.y + (nearest_fraction * delta_y)
+        error = ((float(x) - projected_x) ** 2) + ((float(y) - projected_y) ** 2)
+        if error < best_error:
+            best = (start, end, raw_fraction, math.sqrt(length_squared))
+            best_error = error
+
+    if best is None:
+        return None
+
+    start, end, fraction, length = best
+    tangent_x = (end.x - start.x) / length
+    tangent_y = (end.y - start.y) / length
+    upper_normal_x = -tangent_y
+    upper_normal_y = tangent_x
+    if upper_normal_y > 0:
+        upper_normal_x *= -1
+        upper_normal_y *= -1
+    if abs(upper_normal_y) < 1e-9:
+        # The requested "upper side of the video" sign is undefined for a
+        # perfectly vertical beam calibration.
+        return None
+
+    return LocalBeamSegment(
+        start=start,
+        end=end,
+        fraction=fraction,
+        distance_cm=start.distance_cm + (fraction * (end.distance_cm - start.distance_cm)),
+        tangent_x=tangent_x,
+        tangent_y=tangent_y,
+        upper_normal_x=upper_normal_x,
+        upper_normal_y=upper_normal_y,
+    )
 
 
 def interval_midpoint_distance_from_point(calibration: BeamCalibration, x: int, y: int) -> int:
@@ -251,6 +329,18 @@ class TickCalibrationStore:
         calibrations = self.load_by_key()
         calibrations[calibration.key] = calibration
 
+        self._write(calibrations)
+
+    def delete(self, key: str) -> None:
+        """Remove an unconfirmed draft once its complete calibration is confirmed."""
+        calibrations = self.load_by_key()
+        if key not in calibrations:
+            return
+        del calibrations[key]
+        self._write(calibrations)
+
+    def _write(self, calibrations: dict[str, BeamCalibration]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.DictWriter(handle, fieldnames=self.fieldnames)
             writer.writeheader()
@@ -344,6 +434,7 @@ class DLCTickDetector:
         if not columns:
             return TickDetectionResult((), (), f"{csv_path.name} has no tick labels")
 
+        frame_predictions: list[tuple[int, dict[int, tuple[float, float, float]]]] = []
         candidates: list[tuple[int, dict[int, tuple[float, float, float]], float]] = []
         for row_number, row in enumerate(rows[3:]):
             try:
@@ -362,6 +453,7 @@ class DLCTickDetector:
                 if np.isfinite(x) and np.isfinite(y) and np.isfinite(likelihood):
                     predictions[distance_cm] = (x, y, likelihood)
 
+            frame_predictions.append((frame_number, predictions))
             score = self._clear_frame_score(predictions)
             if score is not None:
                 candidates.append((frame_number, predictions, score))
@@ -370,9 +462,8 @@ class DLCTickDetector:
         # unobstructed, they are still safer than blending in a bad prediction.
         selected = sorted(candidates, key=lambda candidate: candidate[2], reverse=True)[:5]
         if not selected:
-            return TickDetectionResult(
-                (),
-                (),
+            return self._partial_detection(
+                frame_predictions,
                 "No clear non-overlapping calibration frames were found.",
             )
         ticks: list[BeamTick] = []
@@ -387,9 +478,8 @@ class DLCTickDetector:
             )
 
         if not self._has_clear_tick_spacing(ticks):
-            return TickDetectionResult(
-                (),
-                tuple(frame_number for frame_number, _, _ in selected),
+            return self._partial_detection(
+                frame_predictions,
                 "The selected calibration frames produced overlapping ticks; calibration was not saved.",
             )
 
@@ -397,6 +487,60 @@ class DLCTickDetector:
             tuple(ticks),
             tuple(frame_number for frame_number, _, _ in selected),
             f"DLC tick model found {len(ticks)}/{len(BEAM_TICK_MARKS_CM)} ticks from {len(selected)} clear non-overlapping calibration frame(s).",
+        )
+
+    def _partial_detection(
+        self,
+        frame_predictions: list[tuple[int, dict[int, tuple[float, float, float]]]],
+        failure_message: str,
+    ) -> TickDetectionResult:
+        """Keep only independently well-spaced tick predictions for manual review.
+
+        This is deliberately a draft, not an automatic calibration. A merged pair
+        is removed together, so a potentially overlapping model prediction is
+        never used for scoring until the user has placed the missing tick(s).
+        """
+        by_distance: dict[int, list[tuple[float, float, float]]] = {
+            distance_cm: [] for distance_cm in BEAM_TICK_MARKS_CM
+        }
+        for _frame_number, predictions in frame_predictions:
+            for distance_cm, prediction in predictions.items():
+                if prediction[2] >= self.likelihood_cutoff:
+                    by_distance[distance_cm].append(prediction)
+
+        candidates = [
+            BeamTick(
+                distance_cm,
+                int(round(np.median([prediction[0] for prediction in predictions]))),
+                int(round(np.median([prediction[1] for prediction in predictions]))),
+            )
+            for distance_cm, predictions in by_distance.items()
+            if predictions
+        ]
+        ticks = self._non_overlapping_ticks(candidates)
+        if not ticks:
+            return TickDetectionResult((), (), failure_message)
+
+        tick_distances = {tick.distance_cm for tick in ticks}
+        ranked_frames: list[tuple[int, float]] = []
+        for frame_number, predictions in frame_predictions:
+            available = [
+                predictions[distance_cm][2]
+                for distance_cm in tick_distances
+                if distance_cm in predictions
+                and predictions[distance_cm][2] >= self.likelihood_cutoff
+            ]
+            if available:
+                ranked_frames.append((frame_number, float(np.mean(available))))
+        frame_numbers = tuple(
+            frame_number
+            for frame_number, _score in sorted(ranked_frames, key=lambda item: item[1], reverse=True)[:5]
+        )
+        return TickDetectionResult(
+            tuple(ticks),
+            frame_numbers,
+            f"{failure_message} Kept {len(ticks)}/{len(BEAM_TICK_MARKS_CM)} "
+            "non-overlapping ticks as an unconfirmed draft.",
         )
 
     def _clear_frame_score(self, predictions: dict[int, tuple[float, float, float]]) -> float | None:
@@ -420,6 +564,31 @@ class DLCTickDetector:
     @staticmethod
     def _has_clear_tick_spacing(ticks: list[BeamTick]) -> bool:
         return DLCTickDetector._has_clear_tick_spacing_from_x([tick.x for tick in ticks])
+
+    @staticmethod
+    def _non_overlapping_ticks(ticks: list[BeamTick]) -> list[BeamTick]:
+        """Discard both members of every merged or reversed neighbouring pair."""
+        ordered = sorted(ticks, key=lambda tick: tick.distance_cm)
+        if len(ordered) < 2:
+            return ordered
+
+        raw_gaps = [end.x - start.x for start, end in zip(ordered, ordered[1:])]
+        increasing = sum(gap > 0 for gap in raw_gaps)
+        decreasing = sum(gap < 0 for gap in raw_gaps)
+        direction = 1.0 if increasing >= decreasing else -1.0
+        gaps = [direction * gap for gap in raw_gaps]
+        positive_gaps = [gap for gap in gaps if gap > 0]
+        if not positive_gaps:
+            return []
+
+        minimum_gap = 0.35 * float(np.median(positive_gaps))
+        overlapping_indexes: set[int] = set()
+        for index, gap in enumerate(gaps):
+            if gap <= 0 or gap < minimum_gap:
+                overlapping_indexes.update((index, index + 1))
+        return [
+            tick for index, tick in enumerate(ordered) if index not in overlapping_indexes
+        ]
 
     @staticmethod
     def _has_clear_tick_spacing_from_x(x_values: list[float]) -> bool:

@@ -9,15 +9,30 @@ import re
 import cv2
 
 from .dataset import ROOT, TrialVideo
+from .research_angle import TailAngleMeasurement
 
 
 DEFAULT_DLC_PREDICTIONS_DIR = ROOT / "outputs" / "dlc_predictions"
 DEFAULT_DLC_PROJECTS_DIR = ROOT / "models" / "dlc_tracking"
 
-# The mouse model labels the visible paws, tail end, and body center.
+# The legacy model labels visible paws and tail_end; the current model uses
+# back_paw/front_paw plus tail_S, tail_M, and tail_E. Keep both CSV schemas
+# readable so historical outputs stay usable.
 # Unrelated labels such as head and nose are ignored by the GUI.
-TRACKING_BODYPARTS = ("visible_back_paw", "visible_front_paw", "tail_end", "body_center")
-TAIL_END_ALIASES = {"tailend", "tailtip"}
+TRACKING_BODYPARTS = (
+    "visible_back_paw",
+    "visible_front_paw",
+    "back_paw",
+    "front_paw",
+    "tail_S",
+    "tail_M",
+    "tail_E",
+    "tail_end",
+    "body_center",
+)
+TAIL_START_ALIASES = {"tails", "tailstart", "tailbase"}
+TAIL_MIDDLE_ALIASES = {"tailm", "tailmiddle", "tailmid"}
+TAIL_END_ALIASES = {"taile", "tailend", "tailtip"}
 BODY_CENTER_ALIASES = {"bodycenter", "bodycentre", "mousebody"}
 BACK_PAW_ALIASES = {
     "visiblebackpaw",
@@ -28,6 +43,14 @@ BACK_PAW_ALIASES = {
     "visiblerearpaw",
     "hindlimbpaw",
     "backlimbpaw",
+}
+FRONT_PAW_ALIASES = {
+    "visiblefrontpaw",
+    "frontpaw",
+    "forepaw",
+    "visibleforepaw",
+    "forelimbpaw",
+    "frontlimbpaw",
 }
 
 # A lower threshold keeps the live overlay responsive; scoring remains conservative.
@@ -64,6 +87,11 @@ class DLCFramePrediction:
 
     @property
 
+    def visible_front_paw(self) -> DLCPoint | None:
+        return self._first_alias(FRONT_PAW_ALIASES)
+
+    @property
+
     def body_center(self) -> DLCPoint | None:
         return self._first_alias(BODY_CENTER_ALIASES)
 
@@ -71,6 +99,14 @@ class DLCFramePrediction:
 
     def tail_end(self) -> DLCPoint | None:
         return self._first_alias(TAIL_END_ALIASES)
+
+    @property
+    def tail_start(self) -> DLCPoint | None:
+        return self._first_alias(TAIL_START_ALIASES)
+
+    @property
+    def tail_middle(self) -> DLCPoint | None:
+        return self._first_alias(TAIL_MIDDLE_ALIASES)
 
     @property
 
@@ -128,7 +164,7 @@ class DLCPredictionStore:
 
         # If the CSV only has labels like body/head/nose, this GUI should not use it.
         if not columns:
-            raise ValueError("No paw, tail_end, or body_center bodyparts found in the DLC CSV.")
+            raise ValueError("No supported paw, tail, or body-center bodyparts found in the DLC CSV.")
 
         frames: dict[int, DLCFramePrediction] = {}
         for row_number, row in enumerate(rows[3:]):
@@ -252,8 +288,8 @@ def normalize_bodypart_name(name: str) -> str:
 def tracked_bodypart_kind(name: str) -> str | None:
     normalized = normalize_bodypart_name(name)
 
-    # Accept tail_end and common tail-tip naming, but do not accept whole-tail labels.
-    if normalized in TAIL_END_ALIASES:
+    # Accept the named tail landmarks, but not a generic whole-tail label.
+    if normalized in TAIL_START_ALIASES | TAIL_MIDDLE_ALIASES | TAIL_END_ALIASES:
         return "tail"
 
     if normalized in BODY_CENTER_ALIASES:
@@ -265,7 +301,11 @@ def tracked_bodypart_kind(name: str) -> str | None:
     return None
 
 
-def draw_tracking_overlay(frame_bgr, prediction: DLCFramePrediction | None):
+def draw_tracking_overlay(
+    frame_bgr,
+    prediction: DLCFramePrediction | None,
+    tail_angle: TailAngleMeasurement | None = None,
+):
     overlay = frame_bgr.copy()
     if prediction is None:
         cv2.putText(
@@ -280,19 +320,64 @@ def draw_tracking_overlay(frame_bgr, prediction: DLCFramePrediction | None):
         )
         return overlay
 
+    # Draw the tail skeleton first so the landmark dots remain visible on top.
+    for start, end in (
+        (prediction.tail_start, prediction.tail_middle),
+        (prediction.tail_middle, prediction.tail_end),
+    ):
+        if start is not None and end is not None:
+            cv2.line(
+                overlay,
+                (int(round(start.x)), int(round(start.y))),
+                (int(round(end.x)), int(round(end.y))),
+                (0, 0, 0),
+                1,
+                cv2.LINE_AA,
+            )
+
+    if tail_angle is not None:
+        _draw_dotted_line(
+            overlay,
+            (tail_angle.tail_start_x, tail_angle.tail_start_y),
+            (tail_angle.tail_end_x, tail_angle.tail_end_y),
+            (255, 255, 0),
+        )
+        tail_axis = _line_to_frame_bounds(
+            (tail_angle.tail_start_x, tail_angle.tail_start_y),
+            (tail_angle.tail_end_x, tail_angle.tail_end_y),
+            overlay.shape[1],
+            overlay.shape[0],
+        )
+        if tail_axis is not None:
+            _draw_dashed_line(overlay, tail_axis[0], tail_axis[1], (0, 255, 0))
+        label_origin = (
+            int(round(tail_angle.tail_start_x + 10)),
+            max(18, int(round(tail_angle.tail_start_y + 22))),
+        )
+        cv2.putText(
+            overlay,
+            f"Tail angle: {tail_angle.angle_degrees:+.1f} deg",
+            label_origin,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.48,
+            (0, 255, 0),
+            1,
+            cv2.LINE_AA,
+        )
+
     for point in prediction.points:
         center = (int(round(point.x)), int(round(point.y)))
 
-        # Magenta marks paws, yellow marks the tail end, and cyan marks body center.
+        # Magenta marks paws, yellow marks the tail endpoints, orange marks tail_M,
+        # and cyan marks body center.
         if point.kind == "paw":
             color = (255, 0, 255)
         elif point.kind == "tail":
-            color = (0, 220, 255)
+            color = (0, 140, 255) if normalize_bodypart_name(point.name) in TAIL_MIDDLE_ALIASES else (0, 220, 255)
         else:
             color = (255, 220, 0)
 
-        cv2.circle(overlay, center, 5, color, -1)
-        cv2.circle(overlay, center, 8, (255, 255, 255), 1)
+        cv2.circle(overlay, center, 3, color, -1)
         cv2.putText(
             overlay,
             f"{point.name} {point.likelihood:.2f}",
@@ -305,3 +390,78 @@ def draw_tracking_overlay(frame_bgr, prediction: DLCFramePrediction | None):
         )
 
     return overlay
+
+
+def _draw_dotted_line(frame_bgr, start: tuple[float, float], end: tuple[float, float], color: tuple[int, int, int]) -> None:
+    delta_x = end[0] - start[0]
+    delta_y = end[1] - start[1]
+    length = math.hypot(delta_x, delta_y)
+    if length <= 1e-9:
+        return
+    for distance in range(0, int(length) + 1, 7):
+        fraction = min(1.0, distance / length)
+        cv2.circle(
+            frame_bgr,
+            (int(round(start[0] + (fraction * delta_x))), int(round(start[1] + (fraction * delta_y)))),
+            1,
+            color,
+            -1,
+            cv2.LINE_AA,
+        )
+
+
+def _draw_dashed_line(frame_bgr, start: tuple[float, float], end: tuple[float, float], color: tuple[int, int, int]) -> None:
+    delta_x = end[0] - start[0]
+    delta_y = end[1] - start[1]
+    length = math.hypot(delta_x, delta_y)
+    if length <= 1e-9:
+        return
+    dash_length_px = 7.0
+    gap_length_px = 5.0
+    distance = 0.0
+    while distance < length:
+        dash_end = min(length, distance + dash_length_px)
+        start_fraction = distance / length
+        end_fraction = dash_end / length
+        cv2.line(
+            frame_bgr,
+            (int(round(start[0] + (start_fraction * delta_x))), int(round(start[1] + (start_fraction * delta_y)))),
+            (int(round(start[0] + (end_fraction * delta_x))), int(round(start[1] + (end_fraction * delta_y)))),
+            color,
+            1,
+            cv2.LINE_AA,
+        )
+        distance = dash_end + gap_length_px
+
+
+def _line_to_frame_bounds(
+    start: tuple[float, float],
+    end: tuple[float, float],
+    width: int,
+    height: int,
+) -> tuple[tuple[float, float], tuple[float, float]] | None:
+    """Extend a non-zero line through two points to the visible image bounds."""
+    delta_x = end[0] - start[0]
+    delta_y = end[1] - start[1]
+    if math.hypot(delta_x, delta_y) <= 1e-9 or width <= 0 or height <= 0:
+        return None
+
+    intersections: list[tuple[float, float, float]] = []
+    if abs(delta_x) > 1e-9:
+        for edge_x in (0.0, float(width - 1)):
+            fraction = (edge_x - start[0]) / delta_x
+            edge_y = start[1] + (fraction * delta_y)
+            if 0.0 <= edge_y <= height - 1:
+                intersections.append((fraction, edge_x, edge_y))
+    if abs(delta_y) > 1e-9:
+        for edge_y in (0.0, float(height - 1)):
+            fraction = (edge_y - start[1]) / delta_y
+            edge_x = start[0] + (fraction * delta_x)
+            if 0.0 <= edge_x <= width - 1:
+                intersections.append((fraction, edge_x, edge_y))
+
+    if len(intersections) < 2:
+        return None
+    first = min(intersections, key=lambda item: item[0])
+    last = max(intersections, key=lambda item: item[0])
+    return (first[1], first[2]), (last[1], last[2])
