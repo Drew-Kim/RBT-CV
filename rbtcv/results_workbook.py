@@ -9,13 +9,17 @@ from typing import TYPE_CHECKING
 
 from .condition_map import ConditionMapStore
 from .dataset import ROOT, natural_day_key
-from .tail_angle_consistency_plot import TailAngleConsistencyPlotStore
 from .tail_angle_group_plot import TailAngleGroupPlotStore
+from .tail_curvature_plot import TailCurvaturePlotStore
 
 if TYPE_CHECKING:
     from .annotations import TrialAnnotation
+    from .back_front_paw_distance import BackFrontPawDistanceFrameRecord
+    from .back_paw_body_distance import BackPawBodyDistanceFrameRecord
     from .dataset import TrialVideo
     from .research_angle import TailAngleFrameRecord
+    from .tail_curvature import TailCurvatureFrameRecord
+    from .tick_intervals import TickIntervalRecord
 
 
 RESULTS_ROOT = ROOT / "outputs"
@@ -26,6 +30,10 @@ DISTANCE_TABLE_COLUMN = 26
 SPEED_TABLE_ROW = 30
 ANGLE_SHEET = "Frame Angles"
 ANGLE_CONSISTENCY_SHEET = "Tail Angle Trial Consistency"
+TICK_INTERVAL_SHEET = "Tick Interval Times"
+BACK_FRONT_PAW_DISTANCE_SHEET = "Back-Front Paw Distance"
+BACK_PAW_BODY_DISTANCE_SHEET = "Back Paw-Body Distance"
+TAIL_CURVATURE_SHEET = "Tail Curvature"
 ANGLE_METADATA_HEADERS = (
     "Source video",
     "Day",
@@ -61,6 +69,21 @@ ANGLE_CONSISTENCY_HEADERS = (
     "Overall 0-90 cm SD (deg)",
     "Overall 0-90 cm trial n",
 )
+TICK_INTERVAL_METADATA_HEADERS = (
+    "Source video",
+    "Day",
+    "Cage",
+    "Animal",
+    "Group",
+    "Trial",
+)
+TICK_INTERVAL_HEADERS = (
+    *TICK_INTERVAL_METADATA_HEADERS,
+    *(f"{start}-{start + 10} cm (s)" for start in range(0, 90, 10)),
+)
+BACK_FRONT_PAW_DISTANCE_METADATA_HEADERS = ANGLE_METADATA_HEADERS
+BACK_PAW_BODY_DISTANCE_METADATA_HEADERS = ANGLE_METADATA_HEADERS
+TAIL_CURVATURE_METADATA_HEADERS = ANGLE_METADATA_HEADERS
 
 
 class ResultsWorkbookError(RuntimeError):
@@ -176,17 +199,16 @@ class ResultsWorkbook:
                 "Close it in Excel and run the analysis again.",
             )
             if refresh_plot:
-                TailAngleConsistencyPlotStore(self.results_root).refresh_dataset(dataset)
                 TailAngleGroupPlotStore(self.results_root).refresh_dataset(dataset)
             saved_paths[dataset] = path
         return saved_paths
 
     def refresh_tail_angle_consistency(self, dataset: str) -> Path | None:
-        """Rebuild the consistency sheet and chart from already exported angles.
+        """Rebuild the historical consistency sheet and refresh current angle charts.
 
         This makes a newly assigned SHAM/STROKE label visible immediately and
-        also supports creating the first chart from an existing Frame Angles
-        worksheet without re-running DeepLabCut.
+        refreshes the signed-angle and within-trial-variation charts from an
+        existing Frame Angles worksheet without re-running DeepLabCut.
         """
         path = self.path_for_dataset(dataset)
         if not path.exists():
@@ -207,8 +229,267 @@ class ResultsWorkbook:
             path,
             "Close it in Excel and try refreshing the tail-angle results again.",
         )
-        TailAngleConsistencyPlotStore(self.results_root).refresh_dataset(dataset)
         TailAngleGroupPlotStore(self.results_root).refresh_dataset(dataset)
+        return path
+
+    def save_tick_interval_measurements(
+        self,
+        videos: Iterable[TrialVideo],
+        records: Iterable[TickIntervalRecord],
+        *,
+        refresh_plot: bool = True,
+    ) -> dict[str, Path]:
+        """Upsert 0-90 cm interval times, one readable wide row per trial."""
+        videos_by_dataset: dict[str, list[TrialVideo]] = defaultdict(list)
+        for video in videos:
+            videos_by_dataset[video.dataset].append(video)
+
+        records_by_dataset: dict[str, list[TickIntervalRecord]] = defaultdict(list)
+        for record in records:
+            records_by_dataset[record.dataset].append(record)
+
+        saved_paths: dict[str, Path] = {}
+        for dataset, dataset_videos in videos_by_dataset.items():
+            path = self.path_for_dataset(dataset)
+            workbook = self._load_or_create(path)
+            sheet = self._tick_interval_sheet(workbook)
+            self._upsert_tick_interval_rows(
+                sheet,
+                records_by_dataset[dataset],
+                dataset_videos,
+                ConditionMapStore(self.results_root).load(dataset),
+            )
+            self._save_workbook(
+                workbook,
+                path,
+                "Close it in Excel and run the analysis again.",
+            )
+            if refresh_plot:
+                from .tick_interval_plot import TickIntervalPlotStore
+
+                TickIntervalPlotStore(self.results_root).refresh_dataset(dataset)
+            saved_paths[dataset] = path
+        return saved_paths
+
+    def refresh_tick_interval_plots(self, dataset: str) -> Path | None:
+        """Refresh interval-time charts from their existing numeric Excel sheet."""
+        path = self.path_for_dataset(dataset)
+        if not path.exists():
+            return None
+        workbook = self._load_or_create(path)
+        if TICK_INTERVAL_SHEET not in workbook.sheetnames:
+            return None
+        sheet = workbook[TICK_INTERVAL_SHEET]
+        self._upsert_tick_interval_rows(
+            sheet,
+            [],
+            [],
+            ConditionMapStore(self.results_root).load(dataset),
+        )
+        self._save_workbook(
+            workbook,
+            path,
+            "Close it in Excel and try refreshing the tick-interval results again.",
+        )
+        from .tick_interval_plot import TickIntervalPlotStore
+
+        TickIntervalPlotStore(self.results_root).refresh_dataset(dataset)
+        return path
+
+    def save_back_front_paw_distance_measurements(
+        self,
+        videos: Iterable[TrialVideo],
+        records: Iterable[BackFrontPawDistanceFrameRecord],
+        *,
+        refresh_plot: bool = True,
+    ) -> dict[str, Path]:
+        """Upsert frame-wise calibrated back/front paw distances by source trial."""
+        videos_by_dataset: dict[str, list[TrialVideo]] = defaultdict(list)
+        for video in videos:
+            videos_by_dataset[video.dataset].append(video)
+
+        records_by_dataset: dict[str, list[BackFrontPawDistanceFrameRecord]] = defaultdict(list)
+        for record in records:
+            records_by_dataset[record.dataset].append(record)
+
+        saved_paths: dict[str, Path] = {}
+        for dataset, dataset_videos in videos_by_dataset.items():
+            path = self.path_for_dataset(dataset)
+            workbook = self._load_or_create(path)
+            sheet = self._back_front_paw_distance_sheet(workbook)
+            self._upsert_back_front_paw_distance_rows(
+                sheet,
+                records_by_dataset[dataset],
+                dataset_videos,
+                ConditionMapStore(self.results_root).load(dataset),
+            )
+            self._save_workbook(
+                workbook,
+                path,
+                "Close it in Excel and run the analysis again.",
+            )
+            if refresh_plot:
+                from .back_front_paw_distance_plot import BackFrontPawDistancePlotStore
+
+                BackFrontPawDistancePlotStore(self.results_root).refresh_dataset(dataset)
+            saved_paths[dataset] = path
+        return saved_paths
+
+    def refresh_back_front_paw_distance_plots(self, dataset: str) -> Path | None:
+        """Reapply group labels and rebuild paw-distance charts from Excel."""
+        path = self.path_for_dataset(dataset)
+        if not path.exists():
+            return None
+        workbook = self._load_or_create(path)
+        if BACK_FRONT_PAW_DISTANCE_SHEET not in workbook.sheetnames:
+            return None
+        sheet = workbook[BACK_FRONT_PAW_DISTANCE_SHEET]
+        self._upsert_back_front_paw_distance_rows(
+            sheet,
+            [],
+            [],
+            ConditionMapStore(self.results_root).load(dataset),
+        )
+        self._save_workbook(
+            workbook,
+            path,
+            "Close it in Excel and try refreshing the back/front paw-distance results again.",
+        )
+        from .back_front_paw_distance_plot import BackFrontPawDistancePlotStore
+
+        BackFrontPawDistancePlotStore(self.results_root).refresh_dataset(dataset)
+        return path
+
+    def save_back_paw_body_distance_measurements(
+        self,
+        videos: Iterable[TrialVideo],
+        records: Iterable[BackPawBodyDistanceFrameRecord],
+        *,
+        refresh_plot: bool = True,
+    ) -> dict[str, Path]:
+        """Upsert frame-wise calibrated rear-paw/body-center distances.
+
+        Each source trial owns its full row. Reanalysis therefore replaces
+        old frame values instead of leaving stale distances behind.
+        """
+        videos_by_dataset: dict[str, list[TrialVideo]] = defaultdict(list)
+        for video in videos:
+            videos_by_dataset[video.dataset].append(video)
+
+        records_by_dataset: dict[str, list[BackPawBodyDistanceFrameRecord]] = defaultdict(list)
+        for record in records:
+            records_by_dataset[record.dataset].append(record)
+
+        saved_paths: dict[str, Path] = {}
+        for dataset, dataset_videos in videos_by_dataset.items():
+            path = self.path_for_dataset(dataset)
+            workbook = self._load_or_create(path)
+            sheet = self._back_paw_body_distance_sheet(workbook)
+            self._upsert_back_paw_body_distance_rows(
+                sheet,
+                records_by_dataset[dataset],
+                dataset_videos,
+                ConditionMapStore(self.results_root).load(dataset),
+            )
+            self._save_workbook(
+                workbook,
+                path,
+                "Close it in Excel and run the analysis again.",
+            )
+            if refresh_plot:
+                from .back_paw_body_distance_plot import BackPawBodyDistancePlotStore
+
+                BackPawBodyDistancePlotStore(self.results_root).refresh_dataset(dataset)
+            saved_paths[dataset] = path
+        return saved_paths
+
+    def refresh_back_paw_body_distance_plots(self, dataset: str) -> Path | None:
+        """Reapply group labels and rebuild rear-paw/body-distance charts."""
+        path = self.path_for_dataset(dataset)
+        if not path.exists():
+            return None
+        workbook = self._load_or_create(path)
+        if BACK_PAW_BODY_DISTANCE_SHEET not in workbook.sheetnames:
+            return None
+        sheet = workbook[BACK_PAW_BODY_DISTANCE_SHEET]
+        self._upsert_back_paw_body_distance_rows(
+            sheet,
+            [],
+            [],
+            ConditionMapStore(self.results_root).load(dataset),
+        )
+        self._save_workbook(
+            workbook,
+            path,
+            "Close it in Excel and try refreshing the rear-paw/body-distance results again.",
+        )
+        from .back_paw_body_distance_plot import BackPawBodyDistancePlotStore
+
+        BackPawBodyDistancePlotStore(self.results_root).refresh_dataset(dataset)
+        return path
+
+    def save_tail_curvature_measurements(
+        self,
+        videos: Iterable[TrialVideo],
+        records: Iterable[TailCurvatureFrameRecord],
+        *,
+        refresh_plot: bool = True,
+    ) -> dict[str, Path]:
+        """Upsert frame-wise tail bends, one readable wide row per source trial.
+
+        Re-saving a source video replaces its previous frame cells, including
+        clearing stale curvature values when no current valid frame remains.
+        """
+        videos_by_dataset: dict[str, list[TrialVideo]] = defaultdict(list)
+        for video in videos:
+            videos_by_dataset[video.dataset].append(video)
+
+        records_by_dataset: dict[str, list[TailCurvatureFrameRecord]] = defaultdict(list)
+        for record in records:
+            records_by_dataset[record.dataset].append(record)
+
+        saved_paths: dict[str, Path] = {}
+        for dataset, dataset_videos in videos_by_dataset.items():
+            path = self.path_for_dataset(dataset)
+            workbook = self._load_or_create(path)
+            sheet = self._tail_curvature_sheet(workbook)
+            self._upsert_tail_curvature_rows(
+                sheet,
+                records_by_dataset[dataset],
+                dataset_videos,
+                ConditionMapStore(self.results_root).load(dataset),
+            )
+            self._save_workbook(
+                workbook,
+                path,
+                "Close it in Excel and run the analysis again.",
+            )
+            if refresh_plot:
+                TailCurvaturePlotStore(self.results_root).refresh_dataset(dataset)
+            saved_paths[dataset] = path
+        return saved_paths
+
+    def refresh_tail_curvature_plots(self, dataset: str) -> Path | None:
+        """Reapply group labels and rebuild tail-curvature charts from Excel."""
+        path = self.path_for_dataset(dataset)
+        if not path.exists():
+            return None
+        workbook = self._load_or_create(path)
+        if TAIL_CURVATURE_SHEET not in workbook.sheetnames:
+            return None
+        sheet = workbook[TAIL_CURVATURE_SHEET]
+        self._upsert_tail_curvature_rows(
+            sheet,
+            [],
+            [],
+            ConditionMapStore(self.results_root).load(dataset),
+        )
+        self._save_workbook(
+            workbook,
+            path,
+            "Close it in Excel and try refreshing the tail-curvature results again.",
+        )
+        TailCurvaturePlotStore(self.results_root).refresh_dataset(dataset)
         return path
 
     def _load_or_create(self, path: Path):
@@ -262,6 +543,664 @@ class ResultsWorkbook:
         if ANGLE_SHEET in workbook.sheetnames:
             return workbook[ANGLE_SHEET]
         return workbook.create_sheet(ANGLE_SHEET)
+
+    @staticmethod
+    def _back_front_paw_distance_sheet(workbook):
+        if BACK_FRONT_PAW_DISTANCE_SHEET in workbook.sheetnames:
+            return workbook[BACK_FRONT_PAW_DISTANCE_SHEET]
+        return workbook.create_sheet(BACK_FRONT_PAW_DISTANCE_SHEET)
+
+    @staticmethod
+    def _back_paw_body_distance_sheet(workbook):
+        if BACK_PAW_BODY_DISTANCE_SHEET in workbook.sheetnames:
+            return workbook[BACK_PAW_BODY_DISTANCE_SHEET]
+        return workbook.create_sheet(BACK_PAW_BODY_DISTANCE_SHEET)
+
+    @staticmethod
+    def _tail_curvature_sheet(workbook):
+        if TAIL_CURVATURE_SHEET in workbook.sheetnames:
+            return workbook[TAIL_CURVATURE_SHEET]
+        return workbook.create_sheet(TAIL_CURVATURE_SHEET)
+
+    @staticmethod
+    def _tick_interval_sheet(workbook):
+        if TICK_INTERVAL_SHEET in workbook.sheetnames:
+            return workbook[TICK_INTERVAL_SHEET]
+        return workbook.create_sheet(TICK_INTERVAL_SHEET)
+
+    def _upsert_back_front_paw_distance_rows(
+        self,
+        sheet,
+        records: list[BackFrontPawDistanceFrameRecord],
+        videos: list[TrialVideo],
+        conditions: dict[tuple[str, str], str],
+    ) -> None:
+        """Rewrite the owned wide paw-distance sheet, replacing supplied trials."""
+        trials = self._read_back_front_paw_distance_trials(sheet)
+        for video in videos:
+            trials[video.relative_path] = {
+                "source_video": video.relative_path,
+                "day": video.day,
+                "cage": video.cage_number,
+                "animal": video.rat_id,
+                "group": conditions.get((video.cage_number, video.rat_id), "Unassigned"),
+                "trial": video.trial,
+                "distances": {},
+                "back_paw_positions": {},
+            }
+        for record in records:
+            trial = trials.setdefault(
+                record.relative_video,
+                {
+                    "source_video": record.relative_video,
+                    "day": record.day,
+                    "cage": record.cage,
+                    "animal": record.animal,
+                    "group": conditions.get((record.cage, record.animal), "Unassigned"),
+                    "trial": record.trial,
+                    "distances": {},
+                    "back_paw_positions": {},
+                },
+            )
+            trial["distances"][record.frame] = record.back_front_paw_distance_cm
+            trial["back_paw_positions"][record.frame] = record.back_paw_position_cm
+
+        for trial in trials.values():
+            cage = self._normalized(trial["cage"])
+            animal = self._normalized(trial["animal"])
+            trial["group"] = conditions.get((cage, animal), "Unassigned")
+
+        frame_count = max(
+            (
+                max(
+                    max(trial["distances"], default=-1),
+                    max(trial["back_paw_positions"], default=-1),
+                )
+                for trial in trials.values()
+            ),
+            default=-1,
+        ) + 1
+        headers = [
+            *BACK_FRONT_PAW_DISTANCE_METADATA_HEADERS,
+            *(f"Frame {frame}" for frame in range(frame_count)),
+        ]
+        if sheet.max_row:
+            sheet.delete_rows(1, sheet.max_row)
+        sheet.append(headers)
+
+        for trial in sorted(
+            trials.values(),
+            key=lambda item: (
+                natural_day_key(str(item["day"])),
+                self._animal_sort_key(str(item["cage"]), str(item["animal"])),
+                int(item["trial"]),
+                str(item["source_video"]),
+            ),
+        ):
+            sheet.append(
+                (
+                    trial["source_video"],
+                    trial["day"],
+                    trial["cage"],
+                    trial["animal"],
+                    trial["group"],
+                    trial["trial"],
+                    *(
+                        self._back_front_paw_distance_frame_cell(
+                            trial["distances"].get(frame),
+                            trial["back_paw_positions"].get(frame),
+                        )
+                        for frame in range(frame_count)
+                    ),
+                )
+            )
+
+        from openpyxl.utils import get_column_letter
+
+        sheet.freeze_panes = "B2"
+        sheet.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{max(sheet.max_row, 1)}"
+        sheet.column_dimensions["A"].width = 60
+        for column in range(2, len(BACK_FRONT_PAW_DISTANCE_METADATA_HEADERS) + 1):
+            sheet.column_dimensions[get_column_letter(column)].width = 12
+        for column in range(len(BACK_FRONT_PAW_DISTANCE_METADATA_HEADERS) + 1, len(headers) + 1):
+            sheet.column_dimensions[get_column_letter(column)].width = 25
+
+    @staticmethod
+    def _read_back_front_paw_distance_trials(sheet) -> dict[str, dict[str, object]]:
+        """Read the current compact layout plus earlier paired-column variants."""
+        headers = [sheet.cell(row=1, column=column).value for column in range(1, sheet.max_column + 1)]
+        header_names = [str(header or "") for header in headers]
+        if not any(header_names):
+            return {}
+        header_index = {header: index for index, header in enumerate(header_names)}
+        if not all(header in header_index for header in BACK_FRONT_PAW_DISTANCE_METADATA_HEADERS):
+            raise ResultsWorkbookError(
+                f"The {BACK_FRONT_PAW_DISTANCE_SHEET!r} sheet has unexpected columns. "
+                "Rename it, then run analysis again."
+            )
+
+        compact_columns: dict[int, int] = {}
+        distance_columns: dict[int, int] = {}
+        position_columns: dict[int, int] = {}
+        for header, column in header_index.items():
+            if not header.startswith("Frame "):
+                continue
+            try:
+                if header.endswith(" distance (cm)"):
+                    distance_columns[int(header.removeprefix("Frame ").removesuffix(" distance (cm)"))] = column
+                elif header.endswith(" back paw (cm)"):
+                    position_columns[int(header.removeprefix("Frame ").removesuffix(" back paw (cm)"))] = column
+                else:
+                    compact_columns[int(header.removeprefix("Frame "))] = column
+            except ValueError:
+                continue
+
+        trials: dict[str, dict[str, object]] = {}
+        for values in sheet.iter_rows(min_row=2, values_only=True):
+            source_video = str(values[header_index["Source video"]] or "")
+            if not source_video:
+                continue
+            distances: dict[int, float] = {}
+            positions: dict[int, float] = {}
+            for frame, column in distance_columns.items():
+                if column < len(values) and values[column] is not None:
+                    try:
+                        distances[frame] = float(values[column])
+                    except (TypeError, ValueError):
+                        pass
+            for frame, column in position_columns.items():
+                if column < len(values) and values[column] is not None:
+                    try:
+                        positions[frame] = float(values[column])
+                    except (TypeError, ValueError):
+                        pass
+            for frame, column in compact_columns.items():
+                if column >= len(values):
+                    continue
+                distance, position = ResultsWorkbook._parse_back_front_paw_distance_frame_cell(values[column])
+                if distance is not None:
+                    distances[frame] = distance
+                if position is not None:
+                    positions[frame] = position
+            trials[source_video] = {
+                "source_video": source_video,
+                "day": values[header_index["Day"]],
+                "cage": values[header_index["Cage"]],
+                "animal": values[header_index["Animal"]],
+                "group": values[header_index["Group"]],
+                "trial": values[header_index["Trial"]],
+                "distances": distances,
+                "back_paw_positions": positions,
+            }
+        return trials
+
+    def _upsert_back_paw_body_distance_rows(
+        self,
+        sheet,
+        records: list[BackPawBodyDistanceFrameRecord],
+        videos: list[TrialVideo],
+        conditions: dict[tuple[str, str], str],
+    ) -> None:
+        """Rewrite the owned rear-paw/body-distance sheet by source trial."""
+        trials = self._read_back_paw_body_distance_trials(sheet)
+        for video in videos:
+            # A supplied source video owns every frame cell. Start empty so a
+            # reanalysis removes values that are no longer valid.
+            trials[video.relative_path] = {
+                "source_video": video.relative_path,
+                "day": video.day,
+                "cage": video.cage_number,
+                "animal": video.rat_id,
+                "group": conditions.get((video.cage_number, video.rat_id), "Unassigned"),
+                "trial": video.trial,
+                "distances": {},
+                "back_paw_positions": {},
+            }
+        for record in records:
+            trial = trials.setdefault(
+                record.relative_video,
+                {
+                    "source_video": record.relative_video,
+                    "day": record.day,
+                    "cage": record.cage,
+                    "animal": record.animal,
+                    "group": conditions.get((record.cage, record.animal), "Unassigned"),
+                    "trial": record.trial,
+                    "distances": {},
+                    "back_paw_positions": {},
+                },
+            )
+            trial["distances"][record.frame] = record.back_paw_body_distance_cm
+            trial["back_paw_positions"][record.frame] = record.back_paw_position_cm
+
+        # Keep the existing Group column current after the GUI relabels a
+        # subject as SHAM or STROKE.
+        for trial in trials.values():
+            cage = self._normalized(trial["cage"])
+            animal = self._normalized(trial["animal"])
+            trial["group"] = conditions.get((cage, animal), "Unassigned")
+
+        frame_count = max(
+            (
+                max(
+                    max(trial["distances"], default=-1),
+                    max(trial["back_paw_positions"], default=-1),
+                )
+                for trial in trials.values()
+            ),
+            default=-1,
+        ) + 1
+        headers = [
+            *BACK_PAW_BODY_DISTANCE_METADATA_HEADERS,
+            *(f"Frame {frame}" for frame in range(frame_count)),
+        ]
+        if sheet.max_row:
+            sheet.delete_rows(1, sheet.max_row)
+        sheet.append(headers)
+
+        for trial in sorted(
+            trials.values(),
+            key=lambda item: (
+                natural_day_key(str(item["day"])),
+                self._animal_sort_key(str(item["cage"]), str(item["animal"])),
+                int(item["trial"]),
+                str(item["source_video"]),
+            ),
+        ):
+            sheet.append(
+                (
+                    trial["source_video"],
+                    trial["day"],
+                    trial["cage"],
+                    trial["animal"],
+                    trial["group"],
+                    trial["trial"],
+                    *(
+                        self._back_paw_body_distance_frame_cell(
+                            trial["distances"].get(frame),
+                            trial["back_paw_positions"].get(frame),
+                        )
+                        for frame in range(frame_count)
+                    ),
+                )
+            )
+
+        from openpyxl.utils import get_column_letter
+
+        sheet.freeze_panes = "B2"
+        sheet.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{max(sheet.max_row, 1)}"
+        sheet.column_dimensions["A"].width = 60
+        for column in range(2, len(BACK_PAW_BODY_DISTANCE_METADATA_HEADERS) + 1):
+            sheet.column_dimensions[get_column_letter(column)].width = 12
+        for column in range(len(BACK_PAW_BODY_DISTANCE_METADATA_HEADERS) + 1, len(headers) + 1):
+            sheet.column_dimensions[get_column_letter(column)].width = 25
+
+    @staticmethod
+    def _read_back_paw_body_distance_trials(sheet) -> dict[str, dict[str, object]]:
+        """Read compact cells and future paired rear-paw/body columns."""
+        headers = [sheet.cell(row=1, column=column).value for column in range(1, sheet.max_column + 1)]
+        header_names = [str(header or "") for header in headers]
+        if not any(header_names):
+            return {}
+        header_index = {header: index for index, header in enumerate(header_names)}
+        if not all(header in header_index for header in BACK_PAW_BODY_DISTANCE_METADATA_HEADERS):
+            raise ResultsWorkbookError(
+                f"The {BACK_PAW_BODY_DISTANCE_SHEET!r} sheet has unexpected columns. "
+                "Rename it, then run analysis again."
+            )
+
+        compact_columns: dict[int, int] = {}
+        distance_columns: dict[int, int] = {}
+        position_columns: dict[int, int] = {}
+        for header, column in header_index.items():
+            if not header.startswith("Frame "):
+                continue
+            try:
+                if header.endswith(" back paw-body distance (cm)"):
+                    distance_columns[
+                        int(header.removeprefix("Frame ").removesuffix(" back paw-body distance (cm)"))
+                    ] = column
+                elif header.endswith(" distance (cm)"):
+                    distance_columns[
+                        int(header.removeprefix("Frame ").removesuffix(" distance (cm)"))
+                    ] = column
+                elif header.endswith(" back paw (cm)"):
+                    position_columns[
+                        int(header.removeprefix("Frame ").removesuffix(" back paw (cm)"))
+                    ] = column
+                else:
+                    compact_columns[int(header.removeprefix("Frame "))] = column
+            except ValueError:
+                continue
+
+        trials: dict[str, dict[str, object]] = {}
+        for values in sheet.iter_rows(min_row=2, values_only=True):
+            source_video = str(values[header_index["Source video"]] or "")
+            if not source_video:
+                continue
+            distances: dict[int, float] = {}
+            positions: dict[int, float] = {}
+            for frame, column in distance_columns.items():
+                if column < len(values) and values[column] is not None:
+                    try:
+                        distances[frame] = float(values[column])
+                    except (TypeError, ValueError):
+                        pass
+            for frame, column in position_columns.items():
+                if column < len(values) and values[column] is not None:
+                    try:
+                        positions[frame] = float(values[column])
+                    except (TypeError, ValueError):
+                        pass
+            for frame, column in compact_columns.items():
+                if column >= len(values):
+                    continue
+                distance, position = ResultsWorkbook._parse_back_paw_body_distance_frame_cell(
+                    values[column]
+                )
+                if distance is not None:
+                    distances[frame] = distance
+                if position is not None:
+                    positions[frame] = position
+            trials[source_video] = {
+                "source_video": source_video,
+                "day": values[header_index["Day"]],
+                "cage": values[header_index["Cage"]],
+                "animal": values[header_index["Animal"]],
+                "group": values[header_index["Group"]],
+                "trial": values[header_index["Trial"]],
+                "distances": distances,
+                "back_paw_positions": positions,
+            }
+        return trials
+
+    def _upsert_tail_curvature_rows(
+        self,
+        sheet,
+        records: list[TailCurvatureFrameRecord],
+        videos: list[TrialVideo],
+        conditions: dict[tuple[str, str], str],
+    ) -> None:
+        """Rewrite the owned tail-curvature sheet, replacing supplied trials."""
+        trials = self._read_tail_curvature_trials(sheet)
+        for video in videos:
+            # A supplied source video owns all of its frame cells. Starting
+            # from empty maps intentionally removes stale frames after a
+            # re-analysis that has fewer valid curvature measurements.
+            trials[video.relative_path] = {
+                "source_video": video.relative_path,
+                "day": video.day,
+                "cage": video.cage_number,
+                "animal": video.rat_id,
+                "group": conditions.get((video.cage_number, video.rat_id), "Unassigned"),
+                "trial": video.trial,
+                "curvatures": {},
+                "back_paw_positions": {},
+            }
+        for record in records:
+            trial = trials.setdefault(
+                record.relative_video,
+                {
+                    "source_video": record.relative_video,
+                    "day": record.day,
+                    "cage": record.cage,
+                    "animal": record.animal,
+                    "group": conditions.get((record.cage, record.animal), "Unassigned"),
+                    "trial": record.trial,
+                    "curvatures": {},
+                    "back_paw_positions": {},
+                },
+            )
+            trial["curvatures"][record.frame] = record.tail_curvature_degrees
+            trial["back_paw_positions"][record.frame] = record.back_paw_position_cm
+
+        # The ConditionMap is authoritative. This also updates existing rows
+        # when a user relabels a mouse as SHAM or STROKE in the GUI.
+        for trial in trials.values():
+            cage = self._normalized(trial["cage"])
+            animal = self._normalized(trial["animal"])
+            trial["group"] = conditions.get((cage, animal), "Unassigned")
+
+        frame_count = max(
+            (
+                max(
+                    max(trial["curvatures"], default=-1),
+                    max(trial["back_paw_positions"], default=-1),
+                )
+                for trial in trials.values()
+            ),
+            default=-1,
+        ) + 1
+        headers = [
+            *TAIL_CURVATURE_METADATA_HEADERS,
+            *(f"Frame {frame}" for frame in range(frame_count)),
+        ]
+        if sheet.max_row:
+            sheet.delete_rows(1, sheet.max_row)
+        sheet.append(headers)
+
+        for trial in sorted(
+            trials.values(),
+            key=lambda item: (
+                natural_day_key(str(item["day"])),
+                self._animal_sort_key(str(item["cage"]), str(item["animal"])),
+                int(item["trial"]),
+                str(item["source_video"]),
+            ),
+        ):
+            sheet.append(
+                (
+                    trial["source_video"],
+                    trial["day"],
+                    trial["cage"],
+                    trial["animal"],
+                    trial["group"],
+                    trial["trial"],
+                    *(
+                        self._tail_curvature_frame_cell(
+                            trial["curvatures"].get(frame),
+                            trial["back_paw_positions"].get(frame),
+                        )
+                        for frame in range(frame_count)
+                    ),
+                )
+            )
+
+        from openpyxl.utils import get_column_letter
+
+        sheet.freeze_panes = "B2"
+        sheet.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{max(sheet.max_row, 1)}"
+        sheet.column_dimensions["A"].width = 60
+        for column in range(2, len(TAIL_CURVATURE_METADATA_HEADERS) + 1):
+            sheet.column_dimensions[get_column_letter(column)].width = 12
+        for column in range(len(TAIL_CURVATURE_METADATA_HEADERS) + 1, len(headers) + 1):
+            sheet.column_dimensions[get_column_letter(column)].width = 25
+
+    @staticmethod
+    def _read_tail_curvature_trials(sheet) -> dict[str, dict[str, object]]:
+        """Read compact curvature cells plus earlier paired-column variants."""
+        headers = [sheet.cell(row=1, column=column).value for column in range(1, sheet.max_column + 1)]
+        header_names = [str(header or "") for header in headers]
+        if not any(header_names):
+            return {}
+        header_index = {header: index for index, header in enumerate(header_names)}
+        if not all(header in header_index for header in TAIL_CURVATURE_METADATA_HEADERS):
+            raise ResultsWorkbookError(
+                f"The {TAIL_CURVATURE_SHEET!r} sheet has unexpected columns. "
+                "Rename it, then run analysis again."
+            )
+
+        compact_columns: dict[int, int] = {}
+        curvature_columns: dict[int, int] = {}
+        position_columns: dict[int, int] = {}
+        for header, column in header_index.items():
+            if not header.startswith("Frame "):
+                continue
+            try:
+                if header.endswith(" curvature (deg)"):
+                    curvature_columns[
+                        int(header.removeprefix("Frame ").removesuffix(" curvature (deg)"))
+                    ] = column
+                elif header.endswith(" back paw (cm)"):
+                    position_columns[
+                        int(header.removeprefix("Frame ").removesuffix(" back paw (cm)"))
+                    ] = column
+                else:
+                    compact_columns[int(header.removeprefix("Frame "))] = column
+            except ValueError:
+                continue
+
+        trials: dict[str, dict[str, object]] = {}
+        for values in sheet.iter_rows(min_row=2, values_only=True):
+            source_video = str(values[header_index["Source video"]] or "")
+            if not source_video:
+                continue
+            curvatures: dict[int, float] = {}
+            positions: dict[int, float] = {}
+            for frame, column in curvature_columns.items():
+                if column < len(values) and values[column] is not None:
+                    try:
+                        curvatures[frame] = float(values[column])
+                    except (TypeError, ValueError):
+                        pass
+            for frame, column in position_columns.items():
+                if column < len(values) and values[column] is not None:
+                    try:
+                        positions[frame] = float(values[column])
+                    except (TypeError, ValueError):
+                        pass
+            for frame, column in compact_columns.items():
+                if column >= len(values):
+                    continue
+                curvature, position = ResultsWorkbook._parse_tail_curvature_frame_cell(
+                    values[column]
+                )
+                if curvature is not None:
+                    curvatures[frame] = curvature
+                if position is not None:
+                    positions[frame] = position
+            trials[source_video] = {
+                "source_video": source_video,
+                "day": values[header_index["Day"]],
+                "cage": values[header_index["Cage"]],
+                "animal": values[header_index["Animal"]],
+                "group": values[header_index["Group"]],
+                "trial": values[header_index["Trial"]],
+                "curvatures": curvatures,
+                "back_paw_positions": positions,
+            }
+        return trials
+
+    def _upsert_tick_interval_rows(
+        self,
+        sheet,
+        records: list[TickIntervalRecord],
+        videos: list[TrialVideo],
+        conditions: dict[tuple[str, str], str],
+    ) -> None:
+        """Rewrite the owned interval sheet, replacing only supplied trials."""
+        trials = self._read_tick_interval_trials(sheet)
+        for video in videos:
+            trials[video.relative_path] = {
+                "source_video": video.relative_path,
+                "day": video.day,
+                "cage": video.cage_number,
+                "animal": video.rat_id,
+                "group": conditions.get((video.cage_number, video.rat_id), "Unassigned"),
+                "trial": video.trial,
+                "intervals": {},
+            }
+        for record in records:
+            trial = trials.setdefault(
+                record.relative_video,
+                {
+                    "source_video": record.relative_video,
+                    "day": record.day,
+                    "cage": record.cage,
+                    "animal": record.animal,
+                    "group": conditions.get((record.cage, record.animal), "Unassigned"),
+                    "trial": record.trial,
+                    "intervals": {},
+                },
+            )
+            trial["intervals"][record.interval_start_cm] = record.elapsed_seconds
+
+        for trial in trials.values():
+            cage = self._normalized(trial["cage"])
+            animal = self._normalized(trial["animal"])
+            trial["group"] = conditions.get((cage, animal), "Unassigned")
+
+        if sheet.max_row:
+            sheet.delete_rows(1, sheet.max_row)
+        sheet.append(TICK_INTERVAL_HEADERS)
+        for trial in sorted(
+            trials.values(),
+            key=lambda item: (
+                natural_day_key(str(item["day"])),
+                self._animal_sort_key(str(item["cage"]), str(item["animal"])),
+                int(item["trial"]),
+                str(item["source_video"]),
+            ),
+        ):
+            sheet.append(
+                (
+                    trial["source_video"],
+                    trial["day"],
+                    trial["cage"],
+                    trial["animal"],
+                    trial["group"],
+                    trial["trial"],
+                    *(
+                        self._three_decimal(trial["intervals"].get(start))
+                        for start in range(0, 90, 10)
+                    ),
+                )
+            )
+
+        from openpyxl.utils import get_column_letter
+
+        sheet.freeze_panes = "B2"
+        sheet.auto_filter.ref = f"A1:{get_column_letter(len(TICK_INTERVAL_HEADERS))}{max(sheet.max_row, 1)}"
+        sheet.column_dimensions["A"].width = 60
+        for column in range(2, len(TICK_INTERVAL_METADATA_HEADERS) + 1):
+            sheet.column_dimensions[get_column_letter(column)].width = 12
+        for column in range(len(TICK_INTERVAL_METADATA_HEADERS) + 1, len(TICK_INTERVAL_HEADERS) + 1):
+            sheet.column_dimensions[get_column_letter(column)].width = 14
+            for row in range(2, sheet.max_row + 1):
+                sheet.cell(row=row, column=column).number_format = "0.000"
+
+    @staticmethod
+    def _read_tick_interval_trials(sheet) -> dict[str, dict[str, object]]:
+        headers = [sheet.cell(row=1, column=column).value for column in range(1, sheet.max_column + 1)]
+        header_names = [str(header or "") for header in headers]
+        if not any(header_names):
+            return {}
+        header_index = {header: index for index, header in enumerate(header_names)}
+        if not all(header in header_index for header in TICK_INTERVAL_HEADERS):
+            raise ResultsWorkbookError(
+                f"The {TICK_INTERVAL_SHEET!r} sheet has unexpected columns. Rename it, then run analysis again."
+            )
+
+        trials: dict[str, dict[str, object]] = {}
+        for values in sheet.iter_rows(min_row=2, values_only=True):
+            source_video = str(values[header_index["Source video"]] or "")
+            if not source_video:
+                continue
+            intervals = {
+                start: values[header_index[f"{start}-{start + 10} cm (s)"]]
+                for start in range(0, 90, 10)
+                if values[header_index[f"{start}-{start + 10} cm (s)"]] is not None
+            }
+            trials[source_video] = {
+                "source_video": source_video,
+                "day": values[header_index["Day"]],
+                "cage": values[header_index["Cage"]],
+                "animal": values[header_index["Animal"]],
+                "group": values[header_index["Group"]],
+                "trial": values[header_index["Trial"]],
+                "intervals": intervals,
+            }
+        return trials
 
     def _upsert_tail_angle_rows(
         self,
@@ -326,7 +1265,7 @@ class ResultsWorkbook:
         for trial in sorted(
             trials.values(),
             key=lambda item: (
-                item["day"],
+                natural_day_key(str(item["day"])),
                 ResultsWorkbook._animal_sort_key(str(item["cage"]), str(item["animal"])),
                 int(item["trial"]),
                 str(item["source_video"]),
@@ -379,6 +1318,95 @@ class ResultsWorkbook:
         if rounded_back_paw is None:
             return f"{rounded_angle:+.3f} deg; back paw unavailable"
         return f"{rounded_angle:+.3f} deg; {rounded_back_paw:.3f} cm"
+
+    @staticmethod
+    def _back_front_paw_distance_frame_cell(
+        distance_cm: object,
+        back_paw_position_cm: object,
+    ) -> str | None:
+        rounded_distance = ResultsWorkbook._three_decimal(distance_cm)
+        rounded_position = ResultsWorkbook._three_decimal(back_paw_position_cm)
+        if rounded_distance is None and rounded_position is None:
+            return None
+        if rounded_distance is None:
+            return f"distance unavailable; {rounded_position:.3f} cm"
+        if rounded_position is None:
+            return f"{rounded_distance:.3f} cm; back paw unavailable"
+        return f"{rounded_distance:.3f} cm; {rounded_position:.3f} cm"
+
+    @staticmethod
+    def _parse_back_front_paw_distance_frame_cell(
+        value: object,
+    ) -> tuple[float | None, float | None]:
+        if value is None:
+            return None, None
+        if isinstance(value, (float, int)):
+            return float(value), None
+        match = re.fullmatch(
+            r"([+-]?\d+(?:\.\d+)?) cm; ([+-]?\d+(?:\.\d+)?) cm",
+            str(value).strip(),
+        )
+        if match is None:
+            return None, None
+        return float(match.group(1)), float(match.group(2))
+
+    @staticmethod
+    def _back_paw_body_distance_frame_cell(
+        distance_cm: object,
+        back_paw_position_cm: object,
+    ) -> str | None:
+        """Format one wide cell as rear-paw/body distance; paw position."""
+        rounded_distance = ResultsWorkbook._three_decimal(distance_cm)
+        rounded_position = ResultsWorkbook._three_decimal(back_paw_position_cm)
+        if rounded_distance is None and rounded_position is None:
+            return None
+        if rounded_distance is None:
+            return f"distance unavailable; {rounded_position:.3f} cm"
+        if rounded_position is None:
+            return f"{rounded_distance:.3f} cm; back paw unavailable"
+        return f"{rounded_distance:.3f} cm; {rounded_position:.3f} cm"
+
+    @staticmethod
+    def _parse_back_paw_body_distance_frame_cell(
+        value: object,
+    ) -> tuple[float | None, float | None]:
+        if value is None:
+            return None, None
+        if isinstance(value, (float, int)):
+            return float(value), None
+        match = re.fullmatch(
+            r"([+-]?\d+(?:\.\d+)?) cm; ([+-]?\d+(?:\.\d+)?) cm",
+            str(value).strip(),
+        )
+        if match is None:
+            return None, None
+        return float(match.group(1)), float(match.group(2))
+
+    @staticmethod
+    def _tail_curvature_frame_cell(
+        curvature_degrees: object,
+        back_paw_position_cm: object,
+    ) -> str | None:
+        """Format one wide curvature cell as ``angle deg; position cm``."""
+        rounded_curvature = ResultsWorkbook._three_decimal(curvature_degrees)
+        rounded_position = ResultsWorkbook._three_decimal(back_paw_position_cm)
+        if rounded_curvature is None or rounded_position is None:
+            return None
+        return f"{rounded_curvature:.3f} deg; {rounded_position:.3f} cm"
+
+    @staticmethod
+    def _parse_tail_curvature_frame_cell(
+        value: object,
+    ) -> tuple[float | None, float | None]:
+        if value is None:
+            return None, None
+        match = re.fullmatch(
+            r"([+-]?\d+(?:\.\d+)?) deg; ([+-]?\d+(?:\.\d+)?) cm",
+            str(value).strip(),
+        )
+        if match is None:
+            return None, None
+        return float(match.group(1)), float(match.group(2))
 
     @staticmethod
     def _read_tail_angle_trials(sheet) -> dict[str, dict[str, object]]:
@@ -508,7 +1536,7 @@ class ResultsWorkbook:
         subject_keys = set(trial_means) | set(overall_trial_means)
         for day, cage, animal in sorted(
             subject_keys,
-            key=lambda item: (item[0], self._animal_sort_key(item[1], item[2])),
+            key=lambda item: (natural_day_key(item[0]), self._animal_sort_key(item[1], item[2])),
         ):
             values: list[object] = [
                 day,

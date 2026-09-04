@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import csv
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,25 +7,27 @@ from pathlib import Path
 from openpyxl import Workbook, load_workbook
 
 from rbtcv.annotations import TrialAnnotation
+from rbtcv.back_front_paw_distance import BackFrontPawDistanceFrameRecord
 from rbtcv.condition_map import ConditionMapStore
 from rbtcv.dataset import TrialVideo
-from rbtcv.detection import DLCFramePrediction, DLCPoint, DLCTracking
 from rbtcv.research_angle import TailAngleFrameRecord
 from rbtcv.results_workbook import (
     ANGLE_CONSISTENCY_SHEET,
+    BACK_FRONT_PAW_DISTANCE_SHEET,
     LEGACY_ANGLE_HEADERS,
     ResultsWorkbook,
+    TICK_INTERVAL_HEADERS,
+    TICK_INTERVAL_SHEET,
 )
-from rbtcv.tail_angle_consistency_plot import ConsistencySeries, TailAngleConsistencyPlotStore
+from rbtcv.tick_intervals import TickIntervalRecord
 from rbtcv.tail_angle_group_plot import (
     TailAngleGroupPlotStore,
     TrialAngleSeries,
-    summarize_day_by_day_consistency,
     summarize_day_by_day_group_angles,
+    summarize_day_by_day_tail_angle_within_trial_variation,
     summarize_group_angles,
+    summarize_tail_angle_within_trial_variation,
 )
-from rbtcv.tail_position import RAW_FILENAME, TailPositionStore
-from rbtcv.ticks import BeamCalibration, BeamTick
 
 
 def annotation(
@@ -372,8 +373,8 @@ class ResultsWorkbookTests(unittest.TestCase):
             retained = rows[retained_video.relative_path]
             self.assertEqual(retained[headers.index("Frame 30")], "-8.500 deg; 35.500 cm")
 
-    def test_tail_angle_consistency_reports_sample_sd_across_trials_per_mouse(self) -> None:
-        """Each trial contributes one mean per position bin, never one mean per frame."""
+    def test_tail_angle_refresh_creates_comparison_and_within_trial_variation_charts(self) -> None:
+        """The legacy consistency worksheet remains inspectable, but no chart is generated from it."""
         videos = (video(1), video(2), video(3))
         records = tuple(
             TailAngleFrameRecord(
@@ -407,19 +408,235 @@ class ResultsWorkbookTests(unittest.TestCase):
             self.assertEqual(values[headers.index("0-10 cm SD (deg)")], 3.055)
             self.assertEqual(values[headers.index("Overall 0-90 cm trial n")], 3)
             self.assertEqual(values[headers.index("Overall 0-90 cm SD (deg)")], 3.055)
-            plot = root / "Dataset Results" / "tail_angle_trial_consistency_D3.svg"
-            self.assertTrue(plot.exists())
-            text = plot.read_text(encoding="utf-8")
-            self.assertIn("Tail-angle trial consistency", text)
-            self.assertIn("Cage 1 Mouse 1", text)
             self.assertTrue(
-                (root / "Dataset Results" / "tail_angle_group_comparison_D3.svg").exists()
+                (root / "Dataset Results" / "Tail Angle" / "tail_angle_group_comparison_D3.svg").exists()
             )
             self.assertTrue(
-                (root / "Dataset Results" / "Day_tail_angle_group_comparison.svg").exists()
+                (root / "Dataset Results" / "Tail Angle" / "Day_tail_angle_group_comparison.svg").exists()
             )
             self.assertTrue(
-                (root / "Dataset Results" / "Day_tail_angle_trial_consistency.svg").exists()
+                (root / "Dataset Results" / "Tail Angle" / "tail_angle_within_trial_variation_D3.svg").exists()
+            )
+            self.assertTrue(
+                (root / "Dataset Results" / "Tail Angle" / "Day_tail_angle_within_trial_variation.svg").exists()
+            )
+            self.assertFalse(
+                (root / "Dataset Results" / "Tail Angle" / "tail_angle_trial_consistency_D3.svg").exists()
+            )
+            self.assertFalse(
+                (root / "Dataset Results" / "Tail Angle" / "Day_tail_angle_trial_consistency.svg").exists()
+            )
+
+    def test_tick_interval_sheet_is_wide_labeled_and_creates_all_comparison_charts(self) -> None:
+        """Interval times stay numeric, replace one trial, and drive all four charts."""
+        videos = tuple(
+            interval_video("BL", cage, animal, trial)
+            for cage, animal in (("1", "1"), ("1", "2"), ("2", "1"), ("2", "2"))
+            for trial in (1, 2)
+        )
+        elapsed_times = (1.23456, 1.60001, 2.30001, 2.90001, 4.10001, 5.20001, 6.50001, 8.40001)
+        records = tuple(
+            record
+            for trial_video, elapsed in zip(videos, elapsed_times)
+            for record in (
+                interval_record(trial_video, 0, elapsed),
+                interval_record(trial_video, 10, elapsed + 0.11111),
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            conditions = ConditionMapStore(root)
+            conditions.update_many("Dataset", (("1", "1"), ("1", "2")), "SHAM")
+            conditions.update_many("Dataset", (("2", "1"), ("2", "2")), "STROKE")
+            store = ResultsWorkbook(root)
+            store.save_tick_interval_measurements(videos, records)
+
+            # A recalculation replaces a source trial's wide row rather than
+            # appending another row or retaining stale later intervals.
+            replacement = interval_record(videos[0], 0, 9.87654)
+            store.save_tick_interval_measurements((videos[0],), (replacement,))
+
+            workbook = load_workbook(store.path_for_dataset("Dataset"))
+            sheet = workbook[TICK_INTERVAL_SHEET]
+            headers = [cell.value for cell in sheet[1]]
+            self.assertEqual(tuple(headers), TICK_INTERVAL_HEADERS)
+            self.assertEqual(sheet.freeze_panes, "B2")
+            self.assertEqual(sheet.max_row, len(videos) + 1)
+            self.assertEqual(sheet.auto_filter.ref, "A1:O9")
+
+            source_index = headers.index("Source video")
+            group_index = headers.index("Group")
+            first_interval_index = headers.index("0-10 cm (s)")
+            second_interval_index = headers.index("10-20 cm (s)")
+            rows = {row[source_index]: row for row in sheet.iter_rows(min_row=2, values_only=True)}
+            self.assertEqual({row[group_index] for row in rows.values()}, {"SHAM", "STROKE"})
+            self.assertEqual(rows[videos[0].relative_path][group_index], "SHAM")
+            self.assertEqual(rows[videos[-1].relative_path][group_index], "STROKE")
+            self.assertIsInstance(rows[videos[0].relative_path][first_interval_index], float)
+            self.assertEqual(rows[videos[0].relative_path][first_interval_index], 9.877)
+            self.assertIsNone(rows[videos[0].relative_path][second_interval_index])
+            self.assertEqual(sheet.cell(row=2, column=first_interval_index + 1).number_format, "0.000")
+            workbook.close()
+
+            chart_dir = root / "Dataset Results" / "Tick Interval"
+            expected_charts = (
+                chart_dir / "tick_interval_group_comparison_BL.svg",
+                chart_dir / "tick_interval_within_trial_variation_BL.svg",
+                chart_dir / "Day_tick_interval_group_comparison.svg",
+                chart_dir / "Day_tick_interval_within_trial_variation.svg",
+            )
+            for chart in expected_charts:
+                self.assertTrue(chart.exists(), chart)
+                text = chart.read_text(encoding="utf-8")
+                expected_opacity = (
+                    "0.24"
+                    if chart.name in {
+                        "Day_tick_interval_group_comparison.svg",
+                        "Day_tick_interval_within_trial_variation.svg",
+                    }
+                    else "0.18"
+                )
+                self.assertIn(f'fill-opacity="{expected_opacity}"', text)
+            self.assertIn("Tick-interval elapsed-time comparison", expected_charts[0].read_text(encoding="utf-8"))
+            self.assertIn("Each dot is one trial", expected_charts[1].read_text(encoding="utf-8"))
+            day_group_svg = expected_charts[2].read_text(encoding="utf-8")
+            self.assertIn("Colored bars are SHAM/STROKE mean elapsed times", day_group_svg)
+            self.assertIn('fill="#1976D2" cursor="help"', day_group_svg)
+            self.assertNotIn("<polyline", day_group_svg)
+            self.assertIn("#6B7280", day_group_svg)
+            self.assertIn("#374151", day_group_svg)
+            self.assertIn("Lower SD means more even timing", expected_charts[3].read_text(encoding="utf-8"))
+            self.assertFalse((chart_dir / "tick_interval_trial_consistency_BL.svg").exists())
+            self.assertFalse((chart_dir / "Day_tick_interval_trial_consistency.svg").exists())
+
+    def test_tail_angle_sheets_sort_days_chronologically(self) -> None:
+        """All frame-level exports use BL, D3, D8 ... D30 chronological order."""
+        ordered_days = ("BL", "D3", "D8", "D14", "D21", "D30")
+        videos = tuple(interval_video(day, "1", "1", 1) for day in reversed(ordered_days))
+        records = tuple(
+            TailAngleFrameRecord(
+                relative_video=trial_video.relative_path,
+                dataset="Dataset",
+                day=trial_video.day,
+                cage="1",
+                animal="1",
+                group="C1",
+                trial=1,
+                frame=0,
+                time_seconds=0.0,
+                back_paw_position_cm=5.0,
+                signed_tail_angle_degrees=10.0,
+            )
+            for trial_video in videos
+        )
+
+        with tempfile.TemporaryDirectory() as folder:
+            store = ResultsWorkbook(Path(folder))
+            store.save_tail_angle_measurements(videos, records)
+            paw_records = tuple(
+                paw_distance_record(trial_video, 0, 5.0, 5.0)
+                for trial_video in videos
+            )
+            store.save_back_front_paw_distance_measurements(videos, paw_records)
+            workbook = load_workbook(store.path_for_dataset("Dataset"), data_only=True)
+            frame_days = [row[1] for row in workbook["Frame Angles"].iter_rows(min_row=2, values_only=True)]
+            consistency_days = [row[0] for row in workbook[ANGLE_CONSISTENCY_SHEET].iter_rows(min_row=2, values_only=True)]
+            paw_distance_days = [
+                row[1]
+                for row in workbook[BACK_FRONT_PAW_DISTANCE_SHEET].iter_rows(
+                    min_row=2,
+                    values_only=True,
+                )
+            ]
+            workbook.close()
+
+        self.assertEqual(frame_days, list(ordered_days))
+        self.assertEqual(consistency_days, list(ordered_days))
+        self.assertEqual(paw_distance_days, list(ordered_days))
+
+    def test_back_front_paw_distance_sheet_replaces_trials_and_creates_all_charts(self) -> None:
+        """Frame cells stay readable while charts use equal-mouse statistics."""
+        videos = tuple(
+            interval_video("BL", cage, animal, trial)
+            for cage, animal in (("1", "1"), ("1", "2"), ("2", "1"), ("2", "2"))
+            for trial in (1, 2)
+        )
+        records = tuple(
+            record
+            for index, trial_video in enumerate(videos)
+            for record in (
+                paw_distance_record(trial_video, 0, 4.12349 + index, 5.0),
+                paw_distance_record(trial_video, 1, 6.12349 + index, 15.0),
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            conditions = ConditionMapStore(root)
+            conditions.update_many("Dataset", (("1", "1"), ("1", "2")), "SHAM")
+            conditions.update_many("Dataset", (("2", "1"), ("2", "2")), "STROKE")
+            store = ResultsWorkbook(root)
+            store.save_back_front_paw_distance_measurements(videos, records)
+
+            # Reanalysis of one source trial removes its old later-frame value.
+            replacement = paw_distance_record(videos[0], 0, 9.87654, 5.0)
+            store.save_back_front_paw_distance_measurements((videos[0],), (replacement,))
+
+            workbook = load_workbook(store.path_for_dataset("Dataset"))
+            sheet = workbook[BACK_FRONT_PAW_DISTANCE_SHEET]
+            headers = [cell.value for cell in sheet[1]]
+            self.assertEqual(headers[:6], ["Source video", "Day", "Cage", "Animal", "Group", "Trial"])
+            self.assertEqual(sheet.freeze_panes, "B2")
+            self.assertEqual(sheet.auto_filter.ref, "A1:H9")
+            source_index = headers.index("Source video")
+            group_index = headers.index("Group")
+            frame_zero = headers.index("Frame 0")
+            frame_one = headers.index("Frame 1")
+            rows = {row[source_index]: row for row in sheet.iter_rows(min_row=2, values_only=True)}
+            self.assertEqual(rows[videos[0].relative_path][group_index], "SHAM")
+            self.assertEqual(rows[videos[-1].relative_path][group_index], "STROKE")
+            self.assertEqual(rows[videos[0].relative_path][frame_zero], "9.877 cm; 5.000 cm")
+            self.assertIsNone(rows[videos[0].relative_path][frame_one])
+            workbook.close()
+
+            # Relabeling reuses the condition map, including retained existing rows.
+            conditions.update_many("Dataset", (("1", "1"),), "STROKE")
+            store.refresh_back_front_paw_distance_plots("Dataset")
+            workbook = load_workbook(store.path_for_dataset("Dataset"))
+            refreshed = workbook[BACK_FRONT_PAW_DISTANCE_SHEET]
+            refreshed_rows = {
+                row[source_index]: row
+                for row in refreshed.iter_rows(min_row=2, values_only=True)
+            }
+            self.assertEqual(refreshed_rows[videos[0].relative_path][group_index], "STROKE")
+            workbook.close()
+
+            chart_dir = root / "Dataset Results" / "Back_Front paw Distance"
+            expected_charts = (
+                chart_dir / "back_front_paw_distance_group_comparison_BL.svg",
+                chart_dir / "back_front_paw_distance_within_trial_variation_BL.svg",
+                chart_dir / "Day_back_front_paw_distance_group_comparison.svg",
+                chart_dir / "Day_back_front_paw_distance_within_trial_variation.svg",
+            )
+            for chart in expected_charts:
+                self.assertTrue(chart.exists(), chart)
+            self.assertIn('fill-opacity="0.18"', expected_charts[0].read_text(encoding="utf-8"))
+            self.assertIn(
+                "Back/front paw-distance group comparison",
+                expected_charts[0].read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "Lower SD means less within-run variation",
+                expected_charts[1].read_text(encoding="utf-8"),
+            )
+            self.assertIn("Colored bars are SHAM/STROKE mean distances", expected_charts[2].read_text(encoding="utf-8"))
+            self.assertIn("Lower SD means more consistent posture and gait", expected_charts[3].read_text(encoding="utf-8"))
+            self.assertFalse(
+                (chart_dir / "back_front_paw_distance_trial_consistency_BL.svg").exists()
+            )
+            self.assertFalse(
+                (chart_dir / "Day_back_front_paw_distance_trial_consistency.svg").exists()
             )
 
 
@@ -437,39 +654,56 @@ def video(trial: int) -> TrialVideo:
     )
 
 
-class TailAngleConsistencyPlotTests(unittest.TestCase):
-    def test_group_error_band_and_five_degree_axis_ticks_are_rendered(self) -> None:
-        series = (
-            ConsistencySeries(
-                day="D3",
-                cage="1",
-                animal="1",
-                condition="SHAM",
-                standard_deviations=(10.0,) * 9,
-                trial_counts=(3,) * 9,
-                overall_standard_deviation=10.0,
-                overall_trial_count=3,
-            ),
-            ConsistencySeries(
-                day="D3",
-                cage="1",
-                animal="2",
-                condition="SHAM",
-                standard_deviations=(20.0,) * 9,
-                trial_counts=(3,) * 9,
-                overall_standard_deviation=20.0,
-                overall_trial_count=3,
-            ),
-        )
+def interval_video(day: str, cage: str, animal: str, trial: int) -> TrialVideo:
+    return TrialVideo(
+        dataset="Dataset",
+        day=day,
+        group=f"C{cage}",
+        subject=animal,
+        trial=trial,
+        date="2026-08-15",
+        clock=f"1300{trial:02d}",
+        path=Path(f"interval_{day}_{cage}_{animal}_{trial}.avi"),
+        relative_path=f"data/Dataset/{day}/C{cage}_{animal}_T{trial}.avi",
+    )
 
-        svg = TailAngleConsistencyPlotStore._svg("Dataset", "D3", series)
 
-        self.assertIn('fill-opacity="0.18"', svg)
-        self.assertIn("shaded bands show variation across mice", svg)
-        self.assertIn("Sham | Cage 1 Mouse 1 | Trial-to-trial consistency SD", svg)
-        self.assertIn('stroke-width="8" stroke-opacity="0" pointer-events="stroke"', svg)
-        for tick in range(0, 36, 5):
-            self.assertIn(f">{tick}</text>", svg)
+def paw_distance_record(
+    trial_video: TrialVideo,
+    frame: int,
+    distance_cm: float,
+    back_paw_position_cm: float,
+) -> BackFrontPawDistanceFrameRecord:
+    return BackFrontPawDistanceFrameRecord(
+        relative_video=trial_video.relative_path,
+        dataset=trial_video.dataset,
+        day=trial_video.day,
+        cage=trial_video.cage_number,
+        animal=trial_video.rat_id,
+        group=trial_video.group,
+        trial=trial_video.trial,
+        frame=frame,
+        time_seconds=frame / 15.0,
+        back_paw_position_cm=back_paw_position_cm,
+        back_front_paw_distance_cm=distance_cm,
+    )
+
+
+def interval_record(video: TrialVideo, start_cm: int, elapsed_seconds: float) -> TickIntervalRecord:
+    return TickIntervalRecord(
+        relative_video=video.relative_path,
+        dataset=video.dataset,
+        day=video.day,
+        cage=video.cage_number,
+        animal=video.rat_id,
+        group=video.group,
+        trial=video.trial,
+        interval_start_cm=start_cm,
+        interval_end_cm=start_cm + 10,
+        start_frame=start_cm,
+        end_frame=start_cm + 15,
+        elapsed_seconds=elapsed_seconds,
+    )
 
 
 class TailAngleGroupPlotTests(unittest.TestCase):
@@ -524,118 +758,57 @@ class TailAngleGroupPlotTests(unittest.TestCase):
         self.assertIn("Day-by-day signed tail-angle comparison", svg)
         self.assertIn("Experimental day", svg)
         self.assertIn("Signed tail angle", svg)
-        self.assertIn('fill-opacity="0.18"', svg)
+        self.assertIn('#6B7280', svg)
+        self.assertIn('#374151', svg)
+        self.assertIn('+27.500°', svg)
+        self.assertNotIn('<polyline', svg)
 
-    def test_day_by_day_consistency_summarizes_within_mouse_trial_sd(self) -> None:
+    def test_within_trial_variation_is_position_controlled_and_equal_mouse_weighted(self) -> None:
+        root_two = 2.0 ** 0.5
+
+        def frame_bins(*standard_deviations: float) -> tuple[tuple[float, ...], ...]:
+            return tuple(
+                (0.0, standard_deviations[index] * root_two)
+                if index < len(standard_deviations)
+                else ()
+                for index in range(9)
+            )
+
         trials = (
-            TrialAngleSeries("BL", "1", "1", "SHAM", 1, (10.0,) * 9),
-            TrialAngleSeries("BL", "1", "1", "SHAM", 2, (20.0,) * 9),
-            TrialAngleSeries("BL", "1", "2", "SHAM", 1, (30.0,) * 9),
-            TrialAngleSeries("BL", "1", "2", "SHAM", 2, (50.0,) * 9),
-            TrialAngleSeries("D3", "1", "1", "SHAM", 1, (30.0,) * 9),
-            TrialAngleSeries("D3", "1", "1", "SHAM", 2, (40.0,) * 9),
-            TrialAngleSeries("D3", "1", "2", "SHAM", 1, (50.0,) * 9),
-            TrialAngleSeries("D3", "1", "2", "SHAM", 2, (70.0,) * 9),
-            TrialAngleSeries("BL", "2", "1", "STROKE", 1, (-5.0,) * 9),
-            TrialAngleSeries("BL", "2", "1", "STROKE", 2, (-1.0,) * 9),
+            TrialAngleSeries("BL", "1", "1", "SHAM", 1, (0.0,) * 9, frame_bins(1.0, 3.0)),
+            TrialAngleSeries("BL", "1", "1", "SHAM", 2, (0.0,) * 9, frame_bins(5.0)),
+            TrialAngleSeries("BL", "1", "2", "SHAM", 1, (0.0,) * 9, frame_bins(7.0)),
+            TrialAngleSeries("BL", "2", "1", "STROKE", 1, (0.0,) * 9, frame_bins(2.0, 4.0)),
         )
 
-        summaries = {item.condition: item for item in summarize_day_by_day_consistency(trials)}
+        trial_values, mice, groups = summarize_tail_angle_within_trial_variation(trials)
+        self.assertAlmostEqual(trial_values[0].mean_standard_deviation_degrees, 2.0)
+        sham_mouse = next(mouse for mouse in mice if mouse.cage == "1" and mouse.animal == "1")
+        # The three trial/bin SDs (1, 3, and 5) receive equal weight.
+        self.assertAlmostEqual(sham_mouse.mean_standard_deviation_degrees, 3.0)
+        sham_group = next(group for group in groups if group.condition == "SHAM")
+        self.assertAlmostEqual(sham_group.mean_standard_deviation_degrees, 5.0)
+        self.assertAlmostEqual(sham_group.standard_deviation_degrees or 0.0, 2.0 ** 1.5)
 
-        sham = summaries["SHAM"]
-        self.assertAlmostEqual(sham.means["BL"], 10.6066017178)
-        self.assertAlmostEqual(sham.means["D3"], 10.6066017178)
-        self.assertAlmostEqual(sham.standard_deviations["BL"], 5.0)
-        self.assertEqual(sham.mouse_counts, {"BL": 2, "D3": 2})
+        summaries = {
+            item.condition: item
+            for item in summarize_day_by_day_tail_angle_within_trial_variation(trials)
+        }
+        self.assertAlmostEqual(summaries["SHAM"].means["BL"], 5.0)
+        self.assertAlmostEqual(summaries["SHAM"].standard_deviations["BL"] or 0.0, 2.0 ** 1.5)
+        self.assertEqual(summaries["SHAM"].mouse_counts, {"BL": 2})
         self.assertIsNone(summaries["STROKE"].standard_deviations["BL"])
 
-        svg = TailAngleGroupPlotStore._day_by_day_consistency_svg("Dataset", summaries.values())
-        self.assertIn("Day-by-day tail-angle trial consistency", svg)
-        self.assertIn("Lower values mean more consistent trials", svg)
-        self.assertIn("Trial-to-trial tail-angle SD", svg)
-        self.assertIn('fill-opacity="0.18"', svg)
-
-
-def calibration() -> BeamCalibration:
-    return BeamCalibration(
-        key="Dataset|D3|1_1",
-        dataset="Dataset",
-        day="D3",
-        cage="1",
-        subject="1",
-        source_video="source.avi",
-        source_trial=1,
-        frame_numbers=(0,),
-        ticks=(BeamTick(0, 100, 50), BeamTick(120, 300, 50)),
-        confirmed_at="test",
-    )
-
-
-def tracking(tail_y: float) -> DLCTracking:
-    points = {
-        frame: DLCFramePrediction(
-            frame=frame,
-            points=(DLCPoint("tail_end", "tail", 120 + frame, tail_y, 0.99),),
+        svg = TailAngleGroupPlotStore._day_by_day_within_trial_variation_svg(
+            "Dataset", summaries.values()
         )
-        for frame in range(3)
-    }
-    return DLCTracking(csv_path=Path("tracking.csv"), frames=points)
-
-
-class TailPositionStoreTests(unittest.TestCase):
-    def test_batch_record_replaces_each_trial_and_refreshes_labels(self) -> None:
-        with tempfile.TemporaryDirectory() as folder:
-            store = TailPositionStore(Path(folder))
-            records = (
-                (video(1), tracking(40), calibration(), 0, 2),
-                (video(2), tracking(45), calibration(), 0, 2),
-            )
-            plots = store.record_trials(records, refresh_plots=True)
-
-            plot = plots[("Dataset", "D3")]
-            self.assertIsNotNone(plot)
-            self.assertIn("C1_1 (2/3 trials)", plot.read_text(encoding="utf-8"))
-
-            csv_path = store.result_dir("Dataset") / RAW_FILENAME
-            with csv_path.open(newline="", encoding="utf-8") as handle:
-                first_rows = list(csv.DictReader(handle))
-            self.assertEqual(len(first_rows), 6)
-
-            store.record_trials(
-                ((video(1), tracking(35), calibration(), 0, 2),),
-                refresh_plots=True,
-            )
-            with csv_path.open(newline="", encoding="utf-8") as handle:
-                rows = list(csv.DictReader(handle))
-            self.assertEqual(len(rows), 6)
-            first_trial_offsets = {
-                row["tail_offset_px"] for row in rows if row["trial"] == "1"
-            }
-            self.assertEqual(first_trial_offsets, {"15.00000"})
-
-    def test_reanalysis_without_tail_points_removes_stale_plot(self) -> None:
-        with tempfile.TemporaryDirectory() as folder:
-            store = TailPositionStore(Path(folder))
-            initial = store.record_trials(
-                ((video(1), tracking(40), calibration(), 0, 2),),
-                refresh_plots=True,
-            )
-            plot_path = initial[("Dataset", "D3")]
-            self.assertIsNotNone(plot_path)
-            self.assertTrue(plot_path.exists())
-
-            empty_tracking = DLCTracking(Path("empty.csv"), {})
-            refreshed = store.record_trials(
-                ((video(1), empty_tracking, calibration(), 0, 2),),
-                refresh_plots=True,
-            )
-            self.assertIsNone(refreshed[("Dataset", "D3")])
-            self.assertFalse(plot_path.exists())
-
-            csv_path = store.result_dir("Dataset") / RAW_FILENAME
-            with csv_path.open(newline="", encoding="utf-8") as handle:
-                self.assertEqual(list(csv.DictReader(handle)), [])
-
+        self.assertIn("Day-by-day tail-angle within-trial variation", svg)
+        self.assertIn("Lower SD means more stable position-controlled tail posture", svg)
+        self.assertIn("Within-trial tail-angle SD", svg)
+        self.assertIn('#6B7280', svg)
+        self.assertIn('#374151', svg)
+        self.assertIn('5.000°', svg)
+        self.assertNotIn('<polyline', svg)
 
 if __name__ == "__main__":
     unittest.main()

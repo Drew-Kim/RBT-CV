@@ -18,6 +18,7 @@ RESULTS_FILENAME = "RBT_CV_Results.xlsx"
 SHEET_NAME = "Tail Angle Trial Consistency"
 FILE_PREFIX = "tail_angle_trial_consistency_"
 FILE_SUFFIX = ".svg"
+CHART_DIRECTORY = "Tail Angle"
 BIN_STARTS_CM = tuple(range(0, 90, 10))
 
 SHAM_COLOR = "#1976D2"
@@ -52,6 +53,9 @@ class TailAngleConsistencyPlotStore:
     def result_dir(self, dataset: str) -> Path:
         return self.output_root / f"{dataset} Results"
 
+    def chart_dir(self, dataset: str) -> Path:
+        return self.result_dir(dataset) / CHART_DIRECTORY
+
     def refresh_dataset(self, dataset: str) -> dict[str, Path]:
         """Refresh charts from the numeric Excel consistency sheet.
 
@@ -68,19 +72,23 @@ class TailAngleConsistencyPlotStore:
             by_day[item.day].append(item)
 
         result_dir = self.result_dir(dataset)
-        result_dir.mkdir(parents=True, exist_ok=True)
+        chart_dir = self.chart_dir(dataset)
+        chart_dir.mkdir(parents=True, exist_ok=True)
         paths: dict[str, Path] = {}
         for day, day_series in by_day.items():
-            path = result_dir / f"{FILE_PREFIX}{day}{FILE_SUFFIX}"
+            path = chart_dir / f"{FILE_PREFIX}{day}{FILE_SUFFIX}"
             self._write_svg(path, self._svg(dataset, day, day_series))
             paths[day] = path
 
         # A later reanalysis may invalidate every frame for one day. In that
         # case remove its obsolete chart rather than leaving stale results.
         live_names = {path.name for path in paths.values()}
-        for stale_path in result_dir.glob(f"{FILE_PREFIX}*{FILE_SUFFIX}"):
+        for stale_path in chart_dir.glob(f"{FILE_PREFIX}*{FILE_SUFFIX}"):
             if stale_path.name not in live_names:
                 stale_path.unlink()
+        # Clean up only generated charts from the older root-level layout.
+        for stale_path in result_dir.glob(f"{FILE_PREFIX}*{FILE_SUFFIX}"):
+            stale_path.unlink()
         return paths
 
     @staticmethod

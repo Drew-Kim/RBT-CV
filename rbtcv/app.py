@@ -39,8 +39,11 @@ from .scoring import (
 )
 
 from .results_workbook import ResultsWorkbook, ResultsWorkbookError
+from .back_front_paw_distance import back_front_paw_distance_frame_records
+from .back_paw_body_distance import back_paw_body_distance_frame_records
 from .research_angle import calculate_tail_angle, tail_angle_frame_records
-from .tail_position import TailPositionStore
+from .tail_curvature import tail_curvature_frame_records
+from .tick_intervals import tick_interval_records
 from .tracking_rules import FELL, REACHED, analyze_tracking_timeline
 
 from .ticks import (
@@ -78,7 +81,6 @@ class RBTReviewApp(tk.Tk):
         self.dlc_tick_detector = DLCTickDetector()
         self.results_workbook = ResultsWorkbook()
         self.condition_map_store = ConditionMapStore()
-        self.tail_position_store = TailPositionStore()
         self.current_tracking: DLCTracking | None = None
         self.current_scoring_tracking: DLCTracking | None = None
         self.dlc_running = False
@@ -346,14 +348,38 @@ class RBTReviewApp(tk.Tk):
                 return
             refresh_note = ""
             try:
-                refreshed = [
+                tail_angle_refreshed = [
                     self.results_workbook.refresh_tail_angle_consistency(dataset)
                     for dataset in by_dataset
                 ]
-                if any(path is not None for path in refreshed):
+                interval_refreshed = [
+                    self.results_workbook.refresh_tick_interval_plots(dataset)
+                    for dataset in by_dataset
+                ]
+                paw_distance_refreshed = [
+                    self.results_workbook.refresh_back_front_paw_distance_plots(dataset)
+                    for dataset in by_dataset
+                ]
+                paw_body_distance_refreshed = [
+                    self.results_workbook.refresh_back_paw_body_distance_plots(dataset)
+                    for dataset in by_dataset
+                ]
+                curvature_refreshed = [
+                    self.results_workbook.refresh_tail_curvature_plots(dataset)
+                    for dataset in by_dataset
+                ]
+                if any(path is not None for path in tail_angle_refreshed):
                     refresh_note = " Tail-angle graphs refreshed."
+                if any(path is not None for path in interval_refreshed):
+                    refresh_note += " Tick-interval graphs refreshed."
+                if any(path is not None for path in paw_distance_refreshed):
+                    refresh_note += " Back/front paw-distance graphs refreshed."
+                if any(path is not None for path in paw_body_distance_refreshed):
+                    refresh_note += " Back-paw/body-distance graphs refreshed."
+                if any(path is not None for path in curvature_refreshed):
+                    refresh_note += " Tail-curvature graphs refreshed."
             except (OSError, ResultsWorkbookError) as exc:
-                refresh_note = f" Group label saved; tail-angle chart refresh needs retry: {exc}"
+                refresh_note = f" Group label saved; chart refresh needs retry: {exc}"
             refresh_table()
             label = condition if condition else "Unassigned"
             self.status_var.set(f"Assigned {len(selected)} subject(s) as {label}.{refresh_note}")
@@ -1370,34 +1396,20 @@ class RBTReviewApp(tk.Tk):
         angle_trials, angle_frames, angle_skipped, angle_error, sd_graphs = self._export_tail_angle_batch(
             [self.current_video]
         )
-
-        tail_refreshed = False
-        try:
-            calibration = self.calibration_for_video(self.current_video)
-            if calibration is not None and self.current_scoring_tracking is not None:
-                self.tail_position_store.record_trial(
-                    self.current_video,
-                    self.current_scoring_tracking,
-                    calibration,
-                    start.frame,
-                    stop.frame,
-                    refresh_plot=False,
-                )
-                tail_refreshed = (
-                    self.tail_position_store.refresh_day_plot(
-                        self.current_video.dataset,
-                        self.current_video.day,
-                    )
-                    is not None
-                )
-        except OSError as exc:
-            self.status_var.set(
-                f"Saved trial result, but the tail graph could not be updated: {exc}"
-            )
-            return
+        interval_trials, interval_records, interval_skipped, interval_error, interval_graphs = (
+            self._export_tick_interval_batch([self.current_video])
+        )
+        paw_distance_trials, paw_distance_records, paw_distance_skipped, paw_distance_error, paw_distance_graphs = (
+            self._export_back_front_paw_distance_batch([self.current_video])
+        )
+        paw_body_distance_trials, paw_body_distance_records, paw_body_distance_skipped, paw_body_distance_error, paw_body_distance_graphs = (
+            self._export_back_paw_body_distance_batch([self.current_video])
+        )
+        curvature_trials, curvature_frames, curvature_skipped, curvature_error, curvature_graphs = (
+            self._export_tail_curvature_batch([self.current_video])
+        )
 
         self.saved_annotations = self.annotation_store.load_by_video()
-        tail_message = " Tail graph refreshed." if tail_refreshed else ""
         angle_message = (
             f" {angle_frames} valid tail-angle frame(s) exported."
             if angle_trials
@@ -1409,9 +1421,53 @@ class RBTReviewApp(tk.Tk):
             angle_message += " Tail-angle export skipped: tracking or confirmed ticks are unavailable."
         if angle_error:
             angle_message += f" Tail-angle export failed: {angle_error}"
+        interval_message = (
+            f" {interval_records} tick-interval time(s) exported."
+            if interval_trials
+            else ""
+        )
+        if interval_graphs:
+            interval_message += " Tick-interval graphs refreshed."
+        if interval_skipped:
+            interval_message += " Tick-interval export skipped: tracking or confirmed ticks are unavailable."
+        if interval_error:
+            interval_message += f" Tick-interval export failed: {interval_error}"
+        paw_distance_message = (
+            f" {paw_distance_records} back/front paw-distance frame(s) exported."
+            if paw_distance_trials
+            else ""
+        )
+        if paw_distance_graphs:
+            paw_distance_message += " Back/front paw-distance graphs refreshed."
+        if paw_distance_skipped:
+            paw_distance_message += " Back/front paw-distance export skipped: tracking or confirmed ticks are unavailable."
+        if paw_distance_error:
+            paw_distance_message += f" Back/front paw-distance export failed: {paw_distance_error}"
+        paw_body_distance_message = (
+            f" {paw_body_distance_records} back-paw/body-distance frame(s) exported."
+            if paw_body_distance_trials
+            else ""
+        )
+        if paw_body_distance_graphs:
+            paw_body_distance_message += " Back-paw/body-distance graphs refreshed."
+        if paw_body_distance_skipped:
+            paw_body_distance_message += " Back-paw/body-distance export skipped: tracking or confirmed ticks are unavailable."
+        if paw_body_distance_error:
+            paw_body_distance_message += f" Back-paw/body-distance export failed: {paw_body_distance_error}"
+        curvature_message = (
+            f" {curvature_frames} tail-curvature frame(s) exported."
+            if curvature_trials
+            else ""
+        )
+        if curvature_graphs:
+            curvature_message += " Tail-curvature graphs refreshed."
+        if curvature_skipped:
+            curvature_message += " Tail-curvature export skipped: tracking or confirmed ticks are unavailable."
+        if curvature_error:
+            curvature_message += f" Tail-curvature export failed: {curvature_error}"
         self.status_var.set(
             f"Saved trial result: {crossing:.2f} sec, distance {distance_cm} cm."
-            f"{tail_message}{angle_message}"
+            f"{angle_message}{interval_message}{paw_distance_message}{paw_body_distance_message}{curvature_message}"
         )
 
     def save_all_trials(self) -> None:
@@ -1429,16 +1485,27 @@ class RBTReviewApp(tk.Tk):
             self.status_var.set("Select a mouse with available trials first.")
             return
 
-        saved, skipped, graph_ok = self._save_auto_batch(videos, refresh_tail=True)
+        saved, skipped = self._save_auto_batch(videos)
         angle_trials, angle_frames, angle_skipped, angle_error, sd_graphs = (
             self._export_tail_angle_batch(videos)
+        )
+        interval_trials, interval_records, interval_skipped, interval_error, interval_graphs = (
+            self._export_tick_interval_batch(videos)
+        )
+        paw_distance_trials, paw_distance_records, paw_distance_skipped, paw_distance_error, paw_distance_graphs = (
+            self._export_back_front_paw_distance_batch(videos)
+        )
+        paw_body_distance_trials, paw_body_distance_records, paw_body_distance_skipped, paw_body_distance_error, paw_body_distance_graphs = (
+            self._export_back_paw_body_distance_batch(videos)
+        )
+        curvature_trials, curvature_frames, curvature_skipped, curvature_error, curvature_graphs = (
+            self._export_tail_curvature_batch(videos)
         )
         error_message = (
             f" {self.last_batch_save_error}"
             if skipped and self.last_batch_save_error
             else ""
         )
-        graph_message = " Tail graph refreshed." if graph_ok else " Tail graph needs review."
         angle_message = (
             f" {angle_frames} valid tail-angle frame(s) exported from {angle_trials} trial(s)."
             if angle_trials
@@ -1450,9 +1517,53 @@ class RBTReviewApp(tk.Tk):
             angle_message += f" {angle_skipped} tail-angle export trial(s) skipped."
         if angle_error:
             angle_message += f" Tail-angle export failed: {angle_error}"
+        interval_message = (
+            f" {interval_records} tick-interval time(s) exported from {interval_trials} trial(s)."
+            if interval_trials
+            else ""
+        )
+        if interval_graphs:
+            interval_message += " Tick-interval graphs refreshed."
+        if interval_skipped:
+            interval_message += f" {interval_skipped} tick-interval export trial(s) skipped."
+        if interval_error:
+            interval_message += f" Tick-interval export failed: {interval_error}"
+        paw_distance_message = (
+            f" {paw_distance_records} back/front paw-distance frame(s) exported from {paw_distance_trials} trial(s)."
+            if paw_distance_trials
+            else ""
+        )
+        if paw_distance_graphs:
+            paw_distance_message += " Back/front paw-distance graphs refreshed."
+        if paw_distance_skipped:
+            paw_distance_message += f" {paw_distance_skipped} back/front paw-distance export trial(s) skipped."
+        if paw_distance_error:
+            paw_distance_message += f" Back/front paw-distance export failed: {paw_distance_error}"
+        paw_body_distance_message = (
+            f" {paw_body_distance_records} back-paw/body-distance frame(s) exported from {paw_body_distance_trials} trial(s)."
+            if paw_body_distance_trials
+            else ""
+        )
+        if paw_body_distance_graphs:
+            paw_body_distance_message += " Back-paw/body-distance graphs refreshed."
+        if paw_body_distance_skipped:
+            paw_body_distance_message += f" {paw_body_distance_skipped} back-paw/body-distance export trial(s) skipped."
+        if paw_body_distance_error:
+            paw_body_distance_message += f" Back-paw/body-distance export failed: {paw_body_distance_error}"
+        curvature_message = (
+            f" {curvature_frames} tail-curvature frame(s) exported from {curvature_trials} trial(s)."
+            if curvature_trials
+            else ""
+        )
+        if curvature_graphs:
+            curvature_message += " Tail-curvature graphs refreshed."
+        if curvature_skipped:
+            curvature_message += f" {curvature_skipped} tail-curvature export trial(s) skipped."
+        if curvature_error:
+            curvature_message += f" Tail-curvature export failed: {curvature_error}"
         self.status_var.set(
             f"Saved {saved} trial(s); {skipped} need review."
-            f"{error_message}{graph_message}{angle_message}"
+            f"{error_message}{angle_message}{interval_message}{paw_distance_message}{paw_body_distance_message}{curvature_message}"
         )
 
 
@@ -1819,7 +1930,7 @@ class RBTReviewApp(tk.Tk):
                 )
                 return
             self.status_var.set("Day ticks confirmed. Starting day analysis...")
-            self._analyze(day_videos, f"{day} batch", refresh_tail=True)
+            self._analyze(day_videos, f"{day} batch")
 
         self.status_var.set(f"Calibrating {day} ticks before day analysis...")
         self._calibrate_day_ticks(begin_analysis)
@@ -2009,12 +2120,8 @@ class RBTReviewApp(tk.Tk):
         )
         self.time_var.set(f"{self.frame_time(frame_number):.2f} sec")
 
-    def _save_auto_batch(
-        self,
-        videos: list[TrialVideo],
-        refresh_tail: bool = False,
-    ) -> tuple[int, int, bool]:
-        records: list[tuple[TrialVideo, TrialAnnotation, DLCTracking, BeamCalibration]] = []
+    def _save_auto_batch(self, videos: list[TrialVideo]) -> tuple[int, int]:
+        records: list[tuple[TrialVideo, TrialAnnotation]] = []
         skipped = 0
         self.last_batch_save_error = ""
 
@@ -2023,46 +2130,24 @@ class RBTReviewApp(tk.Tk):
             if result is None:
                 skipped += 1
                 continue
-            annotation, tracking, calibration = result
-            records.append((video, annotation, tracking, calibration))
+            annotation, _tracking, _calibration = result
+            records.append((video, annotation))
 
         if not records:
             self.saved_annotations = self.annotation_store.load_by_video()
-            return 0, skipped, not refresh_tail
+            return 0, skipped
 
-        annotations = [annotation for _video, annotation, _tracking, _calibration in records]
+        annotations = [annotation for _video, annotation in records]
         try:
             self.annotation_store.save_many(annotations)
             self.results_workbook.save_many(annotations)
         except (OSError, ResultsWorkbookError) as exc:
             self.last_batch_save_error = str(exc)
             self.saved_annotations = self.annotation_store.load_by_video()
-            return 0, skipped + len(records), False
-
-        try:
-            plots = self.tail_position_store.record_trials(
-                [
-                    (
-                        video,
-                        tracking,
-                        calibration,
-                        annotation.start_frame,
-                        annotation.stop_frame,
-                    )
-                    for video, annotation, tracking, calibration in records
-                ],
-                refresh_plots=refresh_tail,
-            )
-            graph_ok = (
-                not refresh_tail
-                or bool(plots) and all(path is not None for path in plots.values())
-            )
-        except OSError as exc:
-            self.last_batch_save_error = f"Results saved, but tail graph could not be written: {exc}"
-            graph_ok = False
+            return 0, skipped + len(records)
 
         self.saved_annotations = self.annotation_store.load_by_video()
-        return len(records), skipped, graph_ok
+        return len(records), skipped
 
     def _export_tail_angle_batch(self, videos: list[TrialVideo]) -> tuple[int, int, int, str, int]:
         """Export frame-wise research angles without relying on legacy scoring."""
@@ -2118,11 +2203,276 @@ class RBTReviewApp(tk.Tk):
                 error = f"{error} {graph_error}".strip()
         return len(exported_videos), len(angle_records), skipped, error, refreshed_graphs
 
+    def _export_tick_interval_batch(self, videos: list[TrialVideo]) -> tuple[int, int, int, str, int]:
+        """Export calibrated 0-10 through 80-90 cm elapsed times from DLC data.
+
+        This uses the full high-confidence tracking stream rather than the
+        legacy first-fall scorer, so a recovered mouse retains the real elapsed
+        time spent below the boundary. The pure calculation itself stops only
+        at a confidence/frame-data gap, never by inventing a crossing across it.
+        """
+        exported_videos: list[TrialVideo] = []
+        interval_records = []
+        skipped = 0
+
+        for video in videos:
+            calibration = self.calibration_for_video(video)
+            csv_path = self.tracking_store.find_for_video(video)
+            if calibration is None or csv_path is None:
+                skipped += 1
+                continue
+            try:
+                tracking = self.tracking_store.load(csv_path).filtered(
+                    SCORING_LIKELIHOOD_CUTOFF
+                )
+            except (OSError, ValueError):
+                skipped += 1
+                continue
+
+            capture = cv2.VideoCapture(str(video.path))
+            try:
+                fps = float(capture.get(cv2.CAP_PROP_FPS) or 15.0)
+            finally:
+                capture.release()
+            if not np.isfinite(fps) or fps <= 0:
+                fps = 15.0
+
+            exported_videos.append(video)
+            interval_records.extend(
+                tick_interval_records(video, tracking, calibration, fps)
+            )
+
+        error = ""
+        if exported_videos:
+            try:
+                self.results_workbook.save_tick_interval_measurements(
+                    exported_videos,
+                    interval_records,
+                    refresh_plot=False,
+                )
+            except (OSError, ResultsWorkbookError) as exc:
+                error = str(exc)
+
+        refreshed_graphs = 0
+        for dataset in sorted({video.dataset for video in videos}):
+            try:
+                if self.results_workbook.refresh_tick_interval_plots(dataset) is not None:
+                    refreshed_graphs += 1
+            except (OSError, ResultsWorkbookError) as exc:
+                graph_error = str(exc)
+                error = f"{error} {graph_error}".strip()
+        return len(exported_videos), len(interval_records), skipped, error, refreshed_graphs
+
+    def _export_back_front_paw_distance_batch(
+        self,
+        videos: list[TrialVideo],
+    ) -> tuple[int, int, int, str, int]:
+        """Export frame-wise, locally calibrated back/front-paw distance.
+
+        Unlike the tail-angle metric, this requires only the two paw points
+        that define the distance, a valid local tick scale, and a back paw in
+        the 0--90 cm research window.  It uses the saved DLC stream and does
+        not depend on the legacy fall scorer.
+        """
+        exported_videos: list[TrialVideo] = []
+        paw_distance_records = []
+        skipped = 0
+
+        for video in videos:
+            calibration = self.calibration_for_video(video)
+            csv_path = self.tracking_store.find_for_video(video)
+            if calibration is None or csv_path is None:
+                skipped += 1
+                continue
+            try:
+                tracking = self.tracking_store.load(csv_path).filtered(
+                    SCORING_LIKELIHOOD_CUTOFF
+                )
+            except (OSError, ValueError):
+                skipped += 1
+                continue
+
+            capture = cv2.VideoCapture(str(video.path))
+            try:
+                fps = float(capture.get(cv2.CAP_PROP_FPS) or 15.0)
+            finally:
+                capture.release()
+            if not np.isfinite(fps) or fps <= 0:
+                fps = 15.0
+
+            exported_videos.append(video)
+            paw_distance_records.extend(
+                back_front_paw_distance_frame_records(video, tracking, calibration, fps)
+            )
+
+        error = ""
+        if exported_videos:
+            try:
+                self.results_workbook.save_back_front_paw_distance_measurements(
+                    exported_videos,
+                    paw_distance_records,
+                    refresh_plot=False,
+                )
+            except (OSError, ResultsWorkbookError) as exc:
+                error = str(exc)
+
+        refreshed_graphs = 0
+        for dataset in sorted({video.dataset for video in videos}):
+            try:
+                if self.results_workbook.refresh_back_front_paw_distance_plots(dataset) is not None:
+                    refreshed_graphs += 1
+            except (OSError, ResultsWorkbookError) as exc:
+                graph_error = str(exc)
+                error = f"{error} {graph_error}".strip()
+        return (
+            len(exported_videos),
+            len(paw_distance_records),
+            skipped,
+            error,
+            refreshed_graphs,
+        )
+
+    def _export_back_paw_body_distance_batch(
+        self,
+        videos: list[TrialVideo],
+    ) -> tuple[int, int, int, str, int]:
+        """Export frame-wise, beam-scaled rear-paw/body-center distance.
+
+        This reads the saved DLC tracking stream rather than rerunning the
+        tracker.  The metric helper owns the research-frame validity rules;
+        this method only persists its valid measurements and refreshes the
+        associated charts.
+        """
+        exported_videos: list[TrialVideo] = []
+        paw_body_distance_records = []
+        skipped = 0
+
+        for video in videos:
+            calibration = self.calibration_for_video(video)
+            csv_path = self.tracking_store.find_for_video(video)
+            if calibration is None or csv_path is None:
+                skipped += 1
+                continue
+            try:
+                tracking = self.tracking_store.load(csv_path).filtered(
+                    SCORING_LIKELIHOOD_CUTOFF
+                )
+            except (OSError, ValueError):
+                skipped += 1
+                continue
+
+            capture = cv2.VideoCapture(str(video.path))
+            try:
+                fps = float(capture.get(cv2.CAP_PROP_FPS) or 15.0)
+            finally:
+                capture.release()
+            if not np.isfinite(fps) or fps <= 0:
+                fps = 15.0
+
+            exported_videos.append(video)
+            paw_body_distance_records.extend(
+                back_paw_body_distance_frame_records(video, tracking, calibration, fps)
+            )
+
+        error = ""
+        if exported_videos:
+            try:
+                self.results_workbook.save_back_paw_body_distance_measurements(
+                    exported_videos,
+                    paw_body_distance_records,
+                    refresh_plot=False,
+                )
+            except (OSError, ResultsWorkbookError) as exc:
+                error = str(exc)
+
+        refreshed_graphs = 0
+        for dataset in sorted({video.dataset for video in videos}):
+            try:
+                if self.results_workbook.refresh_back_paw_body_distance_plots(dataset) is not None:
+                    refreshed_graphs += 1
+            except (OSError, ResultsWorkbookError) as exc:
+                graph_error = str(exc)
+                error = f"{error} {graph_error}".strip()
+        return (
+            len(exported_videos),
+            len(paw_body_distance_records),
+            skipped,
+            error,
+            refreshed_graphs,
+        )
+
+    def _export_tail_curvature_batch(
+        self,
+        videos: list[TrialVideo],
+    ) -> tuple[int, int, int, str, int]:
+        """Export valid frame-wise tail curvature from the saved DLC stream.
+
+        Curvature is calculated independently from the legacy fall scorer. The
+        pure research helper excludes low-confidence frames, frames outside the
+        calibrated 0--90 cm window, and frames at or below the fall boundary.
+        """
+        exported_videos: list[TrialVideo] = []
+        curvature_records = []
+        skipped = 0
+
+        for video in videos:
+            calibration = self.calibration_for_video(video)
+            csv_path = self.tracking_store.find_for_video(video)
+            if calibration is None or csv_path is None:
+                skipped += 1
+                continue
+            try:
+                tracking = self.tracking_store.load(csv_path).filtered(
+                    SCORING_LIKELIHOOD_CUTOFF
+                )
+            except (OSError, ValueError):
+                skipped += 1
+                continue
+
+            capture = cv2.VideoCapture(str(video.path))
+            try:
+                fps = float(capture.get(cv2.CAP_PROP_FPS) or 15.0)
+            finally:
+                capture.release()
+            if not np.isfinite(fps) or fps <= 0:
+                fps = 15.0
+
+            exported_videos.append(video)
+            curvature_records.extend(
+                tail_curvature_frame_records(video, tracking, calibration, fps)
+            )
+
+        error = ""
+        if exported_videos:
+            try:
+                self.results_workbook.save_tail_curvature_measurements(
+                    exported_videos,
+                    curvature_records,
+                    refresh_plot=False,
+                )
+            except (OSError, ResultsWorkbookError) as exc:
+                error = str(exc)
+
+        refreshed_graphs = 0
+        for dataset in sorted({video.dataset for video in videos}):
+            try:
+                if self.results_workbook.refresh_tail_curvature_plots(dataset) is not None:
+                    refreshed_graphs += 1
+            except (OSError, ResultsWorkbookError) as exc:
+                graph_error = str(exc)
+                error = f"{error} {graph_error}".strip()
+        return (
+            len(exported_videos),
+            len(curvature_records),
+            skipped,
+            error,
+            refreshed_graphs,
+        )
+
     def _analyze(
         self,
         videos: list[TrialVideo],
         label: str,
-        refresh_tail: bool = False,
     ) -> None:
         if not videos:
             self.status_var.set("No videos are available for analysis.")
@@ -2162,7 +2512,6 @@ class RBTReviewApp(tk.Tk):
                 videos,
                 code,
                 output,
-                refresh_tail,
             ),
             f"Analyzing {label}...",
         )
@@ -2172,7 +2521,6 @@ class RBTReviewApp(tk.Tk):
         videos: list[TrialVideo],
         code: int,
         output: str,
-        refresh_tail: bool,
     ) -> None:
         if code:
             self.status_var.set(
@@ -2180,20 +2528,25 @@ class RBTReviewApp(tk.Tk):
             )
             return
 
-        saved, skipped, graph_ok = self._save_auto_batch(videos, refresh_tail)
+        saved, skipped = self._save_auto_batch(videos)
         angle_trials, angle_frames, angle_skipped, angle_error, sd_graphs = self._export_tail_angle_batch(videos)
+        interval_trials, interval_records, interval_skipped, interval_error, interval_graphs = (
+            self._export_tick_interval_batch(videos)
+        )
+        paw_distance_trials, paw_distance_records, paw_distance_skipped, paw_distance_error, paw_distance_graphs = (
+            self._export_back_front_paw_distance_batch(videos)
+        )
+        paw_body_distance_trials, paw_body_distance_records, paw_body_distance_skipped, paw_body_distance_error, paw_body_distance_graphs = (
+            self._export_back_paw_body_distance_batch(videos)
+        )
+        curvature_trials, curvature_frames, curvature_skipped, curvature_error, curvature_graphs = (
+            self._export_tail_curvature_batch(videos)
+        )
         if self.current_video in videos:
             self._load_tracking(self.current_video)
             self._apply_automatic_current_result()
             self.show_frame(self.current_frame)
 
-        graph_message = ""
-        if refresh_tail:
-            graph_message = (
-                " Tail graph refreshed."
-                if graph_ok
-                else " Tail graph needs review."
-            )
         error_message = (
             f" {self.last_batch_save_error}"
             if skipped and self.last_batch_save_error
@@ -2210,16 +2563,60 @@ class RBTReviewApp(tk.Tk):
             angle_message += f" {angle_skipped} angle export trial(s) skipped."
         if angle_error:
             angle_message += f" Angle export failed: {angle_error}"
+        interval_message = (
+            f" {interval_records} tick-interval time(s) exported from {interval_trials} trial(s)."
+            if interval_trials
+            else ""
+        )
+        if interval_graphs:
+            interval_message += " Tick-interval graphs refreshed."
+        if interval_skipped:
+            interval_message += f" {interval_skipped} tick-interval export trial(s) skipped."
+        if interval_error:
+            interval_message += f" Tick-interval export failed: {interval_error}"
+        paw_distance_message = (
+            f" {paw_distance_records} back/front paw-distance frame(s) exported from {paw_distance_trials} trial(s)."
+            if paw_distance_trials
+            else ""
+        )
+        if paw_distance_graphs:
+            paw_distance_message += " Back/front paw-distance graphs refreshed."
+        if paw_distance_skipped:
+            paw_distance_message += f" {paw_distance_skipped} back/front paw-distance export trial(s) skipped."
+        if paw_distance_error:
+            paw_distance_message += f" Back/front paw-distance export failed: {paw_distance_error}"
+        paw_body_distance_message = (
+            f" {paw_body_distance_records} back-paw/body-distance frame(s) exported from {paw_body_distance_trials} trial(s)."
+            if paw_body_distance_trials
+            else ""
+        )
+        if paw_body_distance_graphs:
+            paw_body_distance_message += " Back-paw/body-distance graphs refreshed."
+        if paw_body_distance_skipped:
+            paw_body_distance_message += f" {paw_body_distance_skipped} back-paw/body-distance export trial(s) skipped."
+        if paw_body_distance_error:
+            paw_body_distance_message += f" Back-paw/body-distance export failed: {paw_body_distance_error}"
+        curvature_message = (
+            f" {curvature_frames} tail-curvature frame(s) exported from {curvature_trials} trial(s)."
+            if curvature_trials
+            else ""
+        )
+        if curvature_graphs:
+            curvature_message += " Tail-curvature graphs refreshed."
+        if curvature_skipped:
+            curvature_message += f" {curvature_skipped} tail-curvature export trial(s) skipped."
+        if curvature_error:
+            curvature_message += f" Tail-curvature export failed: {curvature_error}"
         self.status_var.set(
             f"Analysis complete. {saved} result(s) saved to Excel; "
-            f"{skipped} need review.{error_message}{graph_message}{angle_message}"
+            f"{skipped} need review.{error_message}{angle_message}{interval_message}{paw_distance_message}{paw_body_distance_message}{curvature_message}"
         )
 
     def analyze_current_tracking(self) -> None:
         if self.current_video is None:
             self.status_var.set("Load a trial before analyzing.")
             return
-        self._analyze([self.current_video], "current trial", refresh_tail=True)
+        self._analyze([self.current_video], "current trial")
 
     def analyze_selected_animal(self) -> None:
         if self.dataset is None:
@@ -2232,7 +2629,7 @@ class RBTReviewApp(tk.Tk):
             if subject_key
             else []
         )
-        self._analyze(videos, "selected animal", refresh_tail=True)
+        self._analyze(videos, "selected animal")
 
     def analyze_selected_day(self) -> None:
         if self.dataset is None or not self.day_var.get():
@@ -2242,7 +2639,7 @@ class RBTReviewApp(tk.Tk):
         videos = [
             video for video in self.dataset.videos if video.day == self.day_var.get()
         ]
-        self._analyze(videos, "selected day", refresh_tail=True)
+        self._analyze(videos, "selected day")
 
 
 def _numeric_id_sort(value: str) -> tuple[int, int | str]:
