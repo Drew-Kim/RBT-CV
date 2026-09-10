@@ -651,7 +651,7 @@ class RBTReviewApp(tk.Tk):
         self.distance_combo.bind("<<ComboboxSelected>>", lambda _event: self.on_distance_changed())
         ttk.Label(distance_row, text="cm").pack(side=tk.LEFT)
 
-        ttk.Button(mark_box, text="Save Trials", command=self.save_annotation).grid(
+        ttk.Button(mark_box, text="Save Trials", command=self.save_trials).grid(
             row=2, column=0, sticky="ew", pady=(7, 0), padx=(0, 3)
         )
         ttk.Button(mark_box, text="Save All Trials", command=self.save_all_trials).grid(
@@ -1470,8 +1470,8 @@ class RBTReviewApp(tk.Tk):
             f"{angle_message}{interval_message}{paw_distance_message}{paw_body_distance_message}{curvature_message}"
         )
 
-    def save_all_trials(self) -> None:
-        """Save automatic results for T1-T3 of the selected mouse without DLC reruns."""
+    def save_trials(self) -> None:
+        """Save all available trials for the currently selected mouse."""
         if self.dataset is None:
             self.status_var.set("Choose a video folder first.")
             return
@@ -1484,6 +1484,23 @@ class RBTReviewApp(tk.Tk):
         if not videos:
             self.status_var.set("Select a mouse with available trials first.")
             return
+
+        self._save_trial_batch(videos, scope="selected mouse")
+
+    def save_all_trials(self) -> None:
+        """Save every available trial for every eligible mouse in the dataset."""
+        if self.dataset is None:
+            self.status_var.set("Choose a video folder first.")
+            return
+        videos = list(self.dataset.videos)
+        if not videos:
+            self.status_var.set("No eligible trials are available in this dataset.")
+            return
+
+        self._save_trial_batch(videos, scope="dataset")
+
+    def _save_trial_batch(self, videos: list[TrialVideo], *, scope: str) -> None:
+        """Save automatic annotations and research metrics for a video batch."""
 
         saved, skipped = self._save_auto_batch(videos)
         angle_trials, angle_frames, angle_skipped, angle_error, sd_graphs = (
@@ -1562,7 +1579,7 @@ class RBTReviewApp(tk.Tk):
         if curvature_error:
             curvature_message += f" Tail-curvature export failed: {curvature_error}"
         self.status_var.set(
-            f"Saved {saved} trial(s); {skipped} need review."
+            f"Saved {saved} trial(s) for the {scope}; {skipped} need review."
             f"{error_message}{angle_message}{interval_message}{paw_distance_message}{paw_body_distance_message}{curvature_message}"
         )
 
